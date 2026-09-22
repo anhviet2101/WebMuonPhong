@@ -11,3 +11,7 @@ pnpm-debug.log*
 tsconfig.tsbuildinfo
 .DS_Store
 Thumbs.db
+__pycache__/
+*.py[cod]
+media/
+staticfiles/

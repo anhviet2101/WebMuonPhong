@@ -1,0 +1,81 @@
+from celery import shared_task
+from django.db import transaction
+from django.utils import timezone
+
+from backend.bookings.models import (
+    Booking,
+    BookingStatus,
+    Notification,
+    PhysicalStatus,
+)
+from backend.bookings.services.booking_service import transition_status
+
+
+@shared_task
+def auto_expire_unsubmitted_bookings():
+    now = timezone.now()
+    booking_ids = list(
+        Booking.objects.filter(
+            status=BookingStatus.PENDING_HOLD,
+            physical_status=PhysicalStatus.NOT_SUBMITTED,
+            hold_expires_at__lt=now,
+        ).values_list("id", flat=True)
+    )
+    expired_count = 0
+
+    for booking_id in booking_ids:
+        with transaction.atomic():
+            booking = (
+                Booking.objects.select_for_update()
+                .select_related("created_by")
+                .get(pk=booking_id)
+            )
+            if not (
+                booking.status == BookingStatus.PENDING_HOLD
+                and booking.physical_status == PhysicalStatus.NOT_SUBMITTED
+                and booking.hold_expires_at
+                and booking.hold_expires_at < timezone.now()
+            ):
+                continue
+
+            transition_status(booking, BookingStatus.EXPIRED, booking.created_by)
+            Notification.objects.create(
+                user=booking.created_by,
+                type=Notification.NotificationType.EXPIRED,
+                message=(
+                    f"Đơn mượn phòng '{booking.activity_name}' đã hết hạn giữ chỗ "
+                    "do chưa nộp bản scan."
+                ),
+                related_booking=booking,
+            )
+            expired_count += 1
+
+    return expired_count
+
+
+@shared_task
+def auto_complete_past_bookings():
+    booking_ids = list(
+        Booking.objects.filter(
+            status__in=[
+                BookingStatus.APPROVED,
+                BookingStatus.ROOM_CHANGED,
+            ],
+            end_time__lt=timezone.now(),
+        ).values_list("id", flat=True)
+    )
+    completed_count = 0
+
+    for booking_id in booking_ids:
+        with transaction.atomic():
+            booking = Booking.objects.select_for_update().get(pk=booking_id)
+            if booking.status not in {
+                BookingStatus.APPROVED,
+                BookingStatus.ROOM_CHANGED,
+            } or booking.end_time >= timezone.now():
+                continue
+
+            transition_status(booking, BookingStatus.COMPLETED, booking.created_by)
+            completed_count += 1
+
+    return completed_count

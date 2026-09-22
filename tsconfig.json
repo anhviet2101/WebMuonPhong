@@ -16,9 +16,14 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "paths": {
+      "@/components/shared/*": ["./components/shared/*"],
+      "@/components/dashboard/*": ["./components/dashboard/*"],
+      "@/components/calendar/*": ["./components/calendar/*"],
+      "@/components/auth/*": ["./components/auth/*"],
+      "@/components/ui/*": ["./src/components/ui/*"],
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src"],
+  "include": ["src", "components", "app"],
   "references": []
 }

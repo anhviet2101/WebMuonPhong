@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "capture-django-checks",
+			"type": "shell",
+			"command": "cmd.exe /d /c \"cd /d \\\"C:\\Users\\admin\\Documents\\ChatGPT\\AppMuonPhong\\\" & \\\"C:\\Users\\admin\\Documents\\ChatGPT\\AppMuonPhong\\.venv\\Scripts\\python.exe\\\" -c \\\"import pathlib, subprocess; root = pathlib.Path(r'C:\\Users\\admin\\Documents\\ChatGPT\\AppMuonPhong'); outdir = pathlib.Path(r'C:\\Users\\admin\\.copilot\\session-state\\18b7f400-61dc-4052-8337-95dfc4b1027b\\files'); outdir.mkdir(parents=True, exist_ok=True); cmds = [(r'C:\\Users\\admin\\Documents\\ChatGPT\\AppMuonPhong\\.venv\\Scripts\\python.exe', 'manage.py', 'check'), (r'C:\\Users\\admin\\Documents\\ChatGPT\\AppMuonPhong\\.venv\\Scripts\\python.exe', 'manage.py', 'makemigrations', '--check', '--dry-run'), (r'C:\\Users\\admin\\Documents\\ChatGPT\\AppMuonPhong\\.venv\\Scripts\\python.exe', '-m', 'compileall', '.')] ; names=['cmd1','cmd2','cmd3'];\\nfor cmd,name in zip(cmds,names):\\n    p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True);\\n    out = (p.stdout or '') + (p.stderr or '');\\n    (outdir / f'{name}.out').write_text(out, encoding='utf-8', errors='surrogateescape');\\n    (outdir / f'{name}.code').write_text(str(p.returncode), encoding='utf-8')\\nprint('done')\\\"\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "run_manage_check",
+			"type": "shell",
+			"command": "cmd.exe /d /c 'cd /d \"C:\\Users\\admin\\Documents\\ChatGPT\\AppMuonPhong\" & \"C:\\Users\\admin\\Documents\\ChatGPT\\AppMuonPhong\\.venv\\Scripts\\python.exe\" manage.py check'",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}
