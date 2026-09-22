@@ -1,0 +1,761 @@
+HỆ THỐNG QUẢN LÝ ĐĂNG KÝ MƯỢN
+PHÒNG CHO HOẠT ĐỘNG CLB
+1. Mục tiêu
+Xây dựng một hệ thống web hỗ trợ các CLB/đơn vị trực thuộc Đoàn đăng ký sử dụng phòng
+phục vụ hoạt động; đồng thời hỗ trợ Văn phòng Đoàn và đơn vị quản lý cơ sở vật chất kiểm
+soát lịch sử dụng phòng, xét duyệt yêu cầu và xuất các văn bản liên quan.
+
+Hệ thống cần giảm các công việc thủ công hiện tại như:
+
+   ●​   Trao đổi lịch phòng qua tin nhắn/email.
+   ●​   Kiểm tra trùng lịch thủ công.
+   ●​   Tổng hợp nhiều đơn mượn phòng riêng lẻ.
+   ●​   Điền lại thông tin CLB và phòng nhiều lần.
+   ●​   Theo dõi trạng thái xét duyệt bằng bảng tính.
+   ●​   Xử lý thay đổi hoặc hủy lịch sau khi đã đăng ký.
+
+
+
+
+2. Nhóm người dùng
+2.1. Đại diện CLB
+Đại diện được ủy quyền của CLB/đơn vị.
+
+Chức năng
+
+   ●​   Xem lịch phòng.
+   ●​   Xem các khung giờ còn trống.
+   ●​   Tạo yêu cầu mượn phòng.
+   ●​   Chỉnh sửa yêu cầu khi chưa được duyệt.
+   ●​   Hủy yêu cầu.
+   ●​   Theo dõi trạng thái xử lý.
+   ●​   Xem lịch sử các yêu cầu của CLB.
+   ●​   Xuất Đơn mượn phòng – Mẫu A.
+   ●​   Nhận thông báo khi yêu cầu:
+           ○​ được tiếp nhận;
+           ○​   được duyệt;
+           ○​   bị từ chối;
+           ○​   cần chỉnh sửa;
+           ○​   bị thay đổi phòng;
+           ○​   bị hủy.
+
+
+
+
+2.2. Admin – Văn phòng Đoàn
+Đơn vị trung gian quản lý hoạt động CLB.
+
+Chức năng
+
+   ●​ Xem toàn bộ yêu cầu mượn phòng.
+   ●​ Xem lịch sử dụng phòng.
+   ●​ Duyệt sơ bộ yêu cầu.
+   ●​ Yêu cầu CLB bổ sung/chỉnh sửa thông tin.
+   ●​ Từ chối yêu cầu.
+   ●​ Điều chỉnh yêu cầu trong phạm vi được cấp quyền.
+   ●​ Theo dõi trạng thái xử lý của đơn vị quản lý phòng.
+   ●​ Xuất:
+         ○​ đơn của từng CLB;
+         ○​ Đơn mượn phòng chung – Mẫu B;
+         ○​ danh sách tổng hợp các lịch mượn phòng theo ngày/tuần/tháng.
+   ●​ Quản lý CLB và tài khoản đại diện CLB.
+
+
+
+
+2.3. Admin – Phòng Công tác Hành chính và Quản trị Cán
+bộ
+Đơn vị quản lý cơ sở vật chất/phòng.
+
+Chức năng
+
+   ●​   Xem các yêu cầu đã được Văn phòng Đoàn xác nhận.
+   ●​   Duyệt hoặc từ chối yêu cầu sử dụng phòng.
+   ●​   Chuyển phòng nếu phòng được yêu cầu không khả dụng.
+   ●​   Điều chỉnh danh sách phòng có thể cho mượn.
+   ●​   Blackout một phòng hoặc một khoảng thời gian.
+   ●​   Thêm/xóa/ẩn:
+           ○​ tòa nhà;
+         ○​ phòng;
+         ○​ hội trường.
+   ●​ Thiết lập các khung giờ không cho đăng ký.
+   ●​ Ghi chú về tình trạng phòng.
+   ●​ Xem lịch tổng thể tất cả phòng.
+
+
+
+
+3. Cấu trúc địa điểm
+Hệ thống nên thiết kế theo cấu trúc:
+
+Cơ sở → Tòa nhà → Phòng
+
+Ví dụ:
+
+Giảng đường Kiều Mai
+
+   ●​    KM-101
+   ●​    KM-102
+   ●​    KM-201
+   ●​    ...
+
+Giảng đường G3
+
+   ●​ Hội trường G3
+   ●​ Các phòng khác nếu sau này được mở cho CLB.
+
+Admin có thể bổ sung:
+
+   ●​    Tòa nhà mới.
+   ●​    Phòng mới.
+   ●​    Loại phòng.
+   ●​    Sức chứa.
+   ●​    Thiết bị.
+   ●​    Trạng thái cho mượn.
+
+Mỗi phòng có thể có các thuộc tính:
+
+   ●​    Tên phòng.
+   ●​    Tòa nhà.
+   ●​    Sức chứa.
+   ●​    Loại phòng.
+   ●​    Máy chiếu.
+   ●​   Micro.
+   ●​   Điều hòa.
+   ●​   Bảng.
+   ●​   Âm thanh.
+   ●​   Cho phép CLB đăng ký: Có/Không.
+   ●​   Ghi chú.
+   ●​   Thời gian được phép sử dụng.
+
+
+
+
+4. Quy trình đăng ký
+Bước 1 – Chọn thời gian
+Đại diện CLB nhập:
+
+   ●​ Ngày.
+   ●​ Giờ bắt đầu.
+   ●​ Giờ kết thúc.
+
+Hệ thống tự động hiển thị các phòng còn khả dụng.
+
+
+
+
+Bước 2 – Chọn phòng
+Đại diện CLB chọn:
+
+   ●​ Tòa nhà.
+   ●​ Phòng mong muốn.
+
+Có thể cho phép:
+
+   ●​ chọn một phòng chính;
+   ●​ chọn một phòng dự phòng.
+
+
+
+
+Bước 3 – Nhập nội dung hoạt động
+Thông tin có thể gồm:
+   ●​    CLB/đơn vị.
+   ●​    Tên hoạt động.
+   ●​    Nội dung hoạt động.
+   ●​    Số lượng người tham dự dự kiến.
+   ●​    Người phụ trách.
+   ●​    Số điện thoại.
+   ●​    Email.
+   ●​    Thời gian sử dụng.
+   ●​    Thời gian chuẩn bị phòng.
+   ●​    Thời gian thu dọn.
+   ●​    Yêu cầu thiết bị.
+   ●​    Ghi chú.
+
+
+
+
+5. Cơ chế giữ lịch / Blackout
+Không nên coi mọi lần bấm "Gửi đơn" là một booking hoàn chỉnh.
+
+Nên chia trạng thái phòng thành:
+
+Available
+
+Phòng đang có thể đăng ký.
+
+Pending Hold
+
+Một CLB vừa gửi yêu cầu.
+
+Phòng được tạm giữ trong khoảng thời gian đó để tránh CLB khác đăng ký trùng.
+
+Approved
+
+Yêu cầu đã được duyệt.
+
+Lịch được khóa chính thức.
+
+Blocked
+
+Admin chủ động khóa phòng.
+
+Ví dụ:
+
+   ●​ bảo trì;
+    ●​ phục vụ kỳ thi;
+    ●​ hoạt động của Nhà trường;
+    ●​ không cho CLB sử dụng.
+
+Cancelled
+
+Yêu cầu đã bị hủy.
+
+Slot được mở lại.
+
+
+
+
+6. Trạng thái của một yêu cầu
+Nên xây workflow rõ ngay từ đầu.
+
+Ví dụ:
+
+Draft
+
+↓​
+Submitted
+
+↓​
+Văn phòng Đoàn đang xét
+
+Có thể chuyển thành:
+
+    ●​ Needs Revision
+    ●​ Rejected
+    ●​ Approved by Youth Union Office
+
+↓
+
+Chờ đơn vị quản lý phòng duyệt
+
+↓
+
+Một trong:
+
+    ●​ Approved
+    ●​ Rejected
+    ●​ Room Changed
+
+↓
+Completed
+
+Hoặc:
+
+Cancelled
+
+
+
+
+7. Quy tắc chống trùng lịch
+Hai booking xung đột khi:
+
+startA < endB AND endA > startB
+
+Hệ thống phải kiểm tra xung đột ở server, không chỉ trên giao diện.
+
+Ví dụ:
+
+CLB A:​
+13:00–15:00
+
+CLB B:​
+14:00–16:00
+
+→ Không được đăng ký.
+
+Nhưng:
+
+CLB A:​
+13:00–15:00
+
+CLB B:​
+15:00–17:00
+
+→ Có thể cho phép.
+
+
+
+
+8. Buffer time
+Nên cho Admin thiết lập thời gian đệm.
+
+Ví dụ:
+Một CLB đăng ký:
+
+14:00–16:00
+
+Hệ thống thực tế giữ:
+
+13:45–16:15
+
+để dành thời gian:
+
+   ●​   mở phòng;
+   ●​   chuẩn bị;
+   ●​   thu dọn;
+   ●​   bàn giao.
+
+Buffer có thể cấu hình theo từng phòng.
+
+
+
+
+9. Giao diện lịch
+Trang quan trọng nhất của hệ thống nên là Calendar View.
+
+Có thể có:
+
+Theo ngày
+ Phòng       08-10   10-12    13-15       15-17
+
+ KM101       Trống   CLB A   Trống     CLB B
+
+ KM102       Trống   Trống   Blocked   Trống
+
+
+Theo tuần
+
+Tương tự Google Calendar.
+
+Màu lịch có thể phân biệt:
+
+   ●​   Đang chờ duyệt.
+   ●​   Đã duyệt.
+   ●​   Admin khóa.
+   ●​   Hoạt động Nhà trường.
+
+Đại diện CLB không nhất thiết được xem tên CLB khác.
+Có thể chỉ hiển thị:
+
+         Không khả dụng
+
+để hạn chế thông tin nội bộ.
+
+
+
+
+10. Blackout của Admin
+Admin có thể khóa:
+
+Một phòng
+
+Ví dụ:
+
+KM-203
+
+Nhiều phòng
+
+Ví dụ:
+
+Toàn bộ tầng 2.
+
+Một tòa
+
+Ví dụ:
+
+Giảng đường Kiều Mai.
+
+Theo khoảng thời gian
+
+Ví dụ:
+
+01/10/2026 – 05/10/2026
+
+Blackout lặp lại
+
+Ví dụ:
+
+Hội trường G3 không cho CLB đăng ký:
+
+   ●​ Thứ Hai hàng tuần
+   ●​ 07:00–12:00
+Blackout cần có:
+
+   ●​    lý do;
+   ●​    người tạo;
+   ●​    thời gian tạo;
+   ●​    thời gian hiệu lực.
+
+
+
+
+11. Xuất văn bản
+Mẫu A – Đơn của CLB
+Đại diện CLB có thể xuất tự động từ dữ liệu booking.
+
+Hệ thống tự điền:
+
+   ●​    tên CLB;
+   ●​    người đại diện;
+   ●​    nội dung hoạt động;
+   ●​    ngày giờ;
+   ●​    địa điểm;
+   ●​    số lượng người;
+   ●​    thông tin liên hệ.
+
+Định dạng:
+
+   ●​ DOCX;
+   ●​ PDF.
+
+
+
+
+Mẫu B – Đơn tổng hợp của Văn phòng Đoàn
+Admin chọn nhiều yêu cầu.
+
+Ví dụ:
+
+☑ CLB A​
+☑ CLB B​
+☑ CLB C
+
+→ Xuất đơn tổng hợp
+Hệ thống tạo bảng:
+
+ STT      Đơn vị Hoạt động      Phòn    Ngày   Thời gian
+                                 g
+
+Có thể nhóm theo:
+
+   ●​ ngày;
+   ●​ tuần;
+   ●​ đợt hoạt động.
+
+
+
+
+12. Audit Log
+Mọi thao tác quan trọng nên được ghi lại.
+
+Ví dụ:
+
+         09:14 – CLB A gửi yêu cầu.
+
+         10:03 – Admin Văn phòng Đoàn xác nhận.
+
+         14:11 – Admin Phòng Hành chính chuyển KM201 → KM202.
+
+         14:12 – Hệ thống gửi thông báo cho CLB A.
+
+Log lưu:
+
+   ●​     ai thực hiện;
+   ●​     hành động;
+   ●​     thời gian;
+   ●​     dữ liệu trước;
+   ●​     dữ liệu sau.
+
+
+
+
+13. Dashboard Đại diện CLB
+Có thể gồm:
+
+Yêu cầu sắp tới
+   ●​   Ngày.
+   ●​   Phòng.
+   ●​   Hoạt động.
+   ●​   Trạng thái.
+
+Yêu cầu đang xử lý
+
+Lịch sử
+
+Nút
+
++ Đăng ký mượn phòng
+
+
+
+
+14. Dashboard Văn phòng Đoàn
+Có thể có các thẻ:
+
+12​
+Yêu cầu chờ xử lý
+
+7​
+Yêu cầu đã được duyệt hôm nay
+
+3​
+Yêu cầu cần CLB chỉnh sửa
+
+4​
+Hoạt động trong 7 ngày tới
+
+Bên dưới:
+
+   ●​ lịch;
+   ●​ danh sách yêu cầu;
+   ●​ bộ lọc.
+
+
+
+
+15. Dashboard Phòng Hành chính
+Ưu tiên giao diện calendar.
+Có thể xem:
+
+Tòa Kiều Mai
+
+KM101 | KM102 | KM103 | ...
+
+và lịch sử dụng của từng phòng.
+
+Chức năng nhanh:
+
+   ●​   Block phòng.
+   ●​   Approve.
+   ●​   Reject.
+   ●​   Move Room.
+
+
+
+
+16. Thông báo
+Hệ thống nên gửi thông báo khi:
+
+   ●​   CLB gửi đơn.
+   ●​   Admin yêu cầu chỉnh sửa.
+   ●​   Đơn được Văn phòng Đoàn duyệt.
+   ●​   Đơn được Phòng Hành chính duyệt.
+   ●​   Đơn bị từ chối.
+   ●​   Phòng bị thay đổi.
+   ●​   Booking bị hủy.
+
+Các kênh có thể triển khai:
+
+   ●​ Notification trên web.
+   ●​ Email.
+
+Sau này có thể tích hợp:
+
+   ●​ Zalo.
+   ●​ Microsoft Teams.
+   ●​ Telegram.
+
+
+
+
+17. Phân quyền
+Nên dùng RBAC – Role-Based Access Control.
+
+Ví dụ:
+
+         Quyền        CLB    VP Đoàn     HC-QT
+
+ Xem lịch phòng       ✓      ✓           ✓
+
+ Tạo yêu cầu          ✓      ✓           ✓
+
+ Xem mọi yêu cầu             ✓           ✓
+
+ Duyệt cấp Đoàn              ✓
+
+ Duyệt phòng                             ✓
+
+ Quản lý phòng                           ✓
+
+ Blackout phòng                          ✓
+
+ Quản lý CLB                 ✓
+
+ Xuất mẫu A           ✓      ✓           ✓
+
+ Xuất mẫu B                  ✓
+
+
+Không nên hard-code quyền trực tiếp theo role mà nên thiết kế quyền riêng để sau này dễ
+thêm:
+
+   ●​    Super Admin.
+   ●​    Cán bộ Đoàn.
+   ●​    Cán bộ quản lý từng tòa.
+   ●​    Viewer.
+
+
+
+
+18. Một số Business Rules
+Có thể cấu hình:
+
+   ●​    Không cho đăng ký trước quá X ngày.
+   ●​    Phải đăng ký trước ít nhất X giờ/ngày.
+   ●​    Thời lượng tối đa mỗi booking.
+   ●​    Số booking tối đa mỗi CLB/tuần.
+   ●​   Phòng nào cần duyệt đặc biệt.
+   ●​   Hội trường lớn cần đăng ký trước tối thiểu 7 ngày.
+   ●​   Hoạt động trên X người cần thêm tài liệu.
+   ●​   Sau thời điểm nhất định CLB không được tự sửa booking.
+
+Các rule nên để Admin cấu hình thay vì code cố định.
+
+
+
+
+19. MVP đề xuất
+Phiên bản đầu chỉ cần:
+
+   1.​ Đăng nhập và phân quyền.
+   2.​ Quản lý CLB.
+   3.​ Quản lý tòa/phòng.
+   4.​ Calendar phòng.
+   5.​ Tạo yêu cầu mượn phòng.
+   6.​ Kiểm tra trùng lịch.
+   7.​ Workflow duyệt hai cấp.
+   8.​ Blackout phòng.
+   9.​ Hủy booking.
+   10.​Xuất Mẫu A.
+   11.​Xuất Mẫu B.
+   12.​Audit log cơ bản.
+
+Các tính năng như email, analytics, booking lặp lại có thể triển khai sau.
+
+
+
+
+20. Phiên bản nâng cao
+Sau MVP có thể bổ sung:
+
+QR Check-in
+
+CLB quét QR khi nhận phòng.
+
+Biên bản bàn giao
+
+Xác nhận:
+   ●​ tình trạng thiết bị;
+   ●​ giờ nhận;
+   ●​ giờ trả.
+
+Báo cáo sự cố
+
+Ví dụ:
+
+   ●​ hỏng máy chiếu;
+   ●​ hỏng điều hòa;
+   ●​ phòng chưa được mở.
+
+Thống kê
+
+   ●​     CLB sử dụng phòng nhiều nhất.
+   ●​     Phòng được sử dụng nhiều nhất.
+   ●​     Tỷ lệ booking bị hủy.
+   ●​     Tỷ lệ đơn được duyệt.
+   ●​     Khung giờ có nhu cầu cao.
+
+Booking định kỳ
+
+Ví dụ:
+
+         CLB Robotics – mỗi thứ Ba 18:00–20:00 trong 8 tuần.
+
+Hệ thống kiểm tra xung đột từng buổi trước khi tạo.
+
+
+
+
+21. Cấu trúc dữ liệu sơ bộ
+Các entity chính:
+
+User
+
+   ●​     id
+   ●​     name
+   ●​     email
+   ●​     role
+   ●​     organization_id
+
+Organization
+  ●​   id
+  ●​   name
+  ●​   abbreviation
+  ●​   type
+
+Building
+
+  ●​ id
+  ●​ name
+  ●​ active
+
+Room
+
+  ●​   id
+  ●​   building_id
+  ●​   name
+  ●​   capacity
+  ●​   type
+  ●​   active
+  ●​   rentable
+
+Booking
+
+  ●​   id
+  ●​   organization_id
+  ●​   room_id
+  ●​   activity_name
+  ●​   description
+  ●​   start_time
+  ●​   end_time
+  ●​   participant_count
+  ●​   status
+  ●​   created_by
+  ●​   created_at
+
+BookingApproval
+
+  ●​   booking_id
+  ●​   approval_level
+  ●​   approver
+  ●​   status
+  ●​   comment
+  ●​   timestamp
+RoomBlackout
+
+   ●​   room_id
+   ●​   start_time
+   ●​   end_time
+   ●​   reason
+   ●​   created_by
+
+AuditLog
+
+   ●​   user
+   ●​   action
+   ●​   entity
+   ●​   timestamp
+   ●​   old_value
+   ●​   new_value
+
+
+
+
+22. Nguyên tắc thiết kế
+Hệ thống nên tuân theo ba nguyên tắc:
+
+Một nguồn dữ liệu duy nhất
+
+Lịch trên hệ thống phải là nguồn lịch chính thức, tránh vừa Excel vừa Google Calendar vừa tin
+nhắn.
+
+Không cho phép xung đột dữ liệu
+
+Mọi booking và blackout phải được kiểm tra ở phía server.
+
+Mọi thay đổi đều truy vết được
+
+Admin không được sửa lịch mà không để lại lịch sử.
+
