@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
-from .models import Organization, Permission, Role, RolePermission, UserProfile
+from .models import Organization, Role, UserProfile
 
 
 User = get_user_model()
@@ -13,10 +13,8 @@ class AccountApiTests(APITestCase):
         self.organization = Organization.objects.create(
             name="CLB Test", type="club", contact_email="old@example.com"
         )
-        self.role = Role.objects.create(name="CLB_REP")
-        self.admin_role = Role.objects.create(name="YU_ADMIN")
-        permission = Permission.objects.create(key="organization.manage")
-        RolePermission.objects.create(role=self.admin_role, permission=permission)
+        self.role = Role.objects.get(name="CLB_REP")
+        self.admin_role = Role.objects.get(name="YU_ADMIN")
         self.user = User.objects.create_user(
             username="representative", email="rep@example.com", password="OldPass123!"
         )

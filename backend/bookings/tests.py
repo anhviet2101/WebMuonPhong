@@ -15,10 +15,8 @@ from backend.bookings.models import (
     Campus,
     Organization,
     Notification,
-    Permission,
     PhysicalStatus,
     Role,
-    RolePermission,
     Room,
     RoomBlackout,
     UserProfile,
@@ -52,7 +50,7 @@ class BookingApiTests(APITestCase):
             abbreviation="B",
             type="club",
         )
-        self.role = Role.objects.create(name="CLB_REP")
+        self.role = Role.objects.get(name="CLB_REP")
         self.user = User.objects.create_user("club-a", password="password")
         self.other_user = User.objects.create_user("club-b", password="password")
         UserProfile.objects.create(
@@ -111,8 +109,6 @@ class BookingApiTests(APITestCase):
         self.assertEqual([item["id"] for item in response.data], [own_booking.id])
 
     def test_club_can_create_booking_without_supplying_organization(self):
-        permission = Permission.objects.create(key="booking.create")
-        RolePermission.objects.create(role=self.role, permission=permission)
         self.client.force_authenticate(self.user)
         start = timezone.now() + timedelta(days=2)
 
@@ -136,9 +132,7 @@ class BookingApiTests(APITestCase):
         self.assertEqual(Booking.objects.get(pk=response.data["id"]).organization, self.organization)
 
     def test_admin_account_requires_and_keeps_selected_club(self):
-        admin_role = Role.objects.create(name="YU_ADMIN")
-        manage = Permission.objects.create(key="organization.manage")
-        RolePermission.objects.create(role=admin_role, permission=manage)
+        admin_role = Role.objects.get(name="YU_ADMIN")
         admin = User.objects.create_user("office", password="OfficePass123!")
         UserProfile.objects.create(user=admin, role=admin_role)
         self.client.force_authenticate(admin)
@@ -424,9 +418,7 @@ class BookingConflictServiceTests(APITestCase):
             abbreviation="CLB",
             type="club",
         )
-        role = Role.objects.create(name="CLB_REP")
-        permission = Permission.objects.create(key="booking.create")
-        RolePermission.objects.create(role=role, permission=permission)
+        role = Role.objects.get(name="CLB_REP")
         self.user = User.objects.create_user("club", password="password")
         UserProfile.objects.create(
             user=self.user,
@@ -494,7 +486,7 @@ class BookingMaintenanceTaskTests(APITestCase):
             abbreviation="CLB",
             type="club",
         )
-        role = Role.objects.create(name="CLB_REP")
+        role = Role.objects.get(name="CLB_REP")
         self.user = User.objects.create_user("club", password="password")
         UserProfile.objects.create(
             user=self.user,
