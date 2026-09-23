@@ -172,6 +172,9 @@ REST_FRAMEWORK = {
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
 CELERY_TIMEZONE = TIME_ZONE
+MAINTENANCE_TOKEN = os.getenv("MAINTENANCE_TOKEN", "")
+if MAINTENANCE_TOKEN and len(MAINTENANCE_TOKEN) < 32:
+    raise ImproperlyConfigured("MAINTENANCE_TOKEN must be at least 32 characters long.")
 CELERY_BEAT_SCHEDULE = {
     "auto-expire-unsubmitted-bookings": {
         "task": "backend.bookings.tasks.auto_expire_unsubmitted_bookings",

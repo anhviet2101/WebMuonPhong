@@ -1,0 +1,7 @@
+name = "muonphong-booking-maintenance"
+main = "src/index.js"
+compatibility_date = "2026-09-24"
+workers_dev = false
+
+[triggers]
+crons = ["*/15 * * * *"]

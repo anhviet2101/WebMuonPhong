@@ -34,6 +34,8 @@ services:
         sync: false
       - key: CELERY_RESULT_BACKEND
         sync: false
+      - key: MAINTENANCE_TOKEN
+        sync: false
       - key: EMAIL_BACKEND
         sync: false
       - key: EMAIL_HOST
