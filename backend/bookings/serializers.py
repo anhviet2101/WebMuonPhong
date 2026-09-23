@@ -158,8 +158,8 @@ class UserAdminSerializer(serializers.ModelSerializer):
 class CampusSerializer(serializers.ModelSerializer):
     class Meta:
         model = Campus
-        fields = ["id", "name", "code", "address", "active"]
-        read_only_fields = ["id"]
+        fields = ["id", "name", "code", "address", "active", "archived_at"]
+        read_only_fields = ["id", "archived_at"]
 
 
 class BuildingSerializer(serializers.ModelSerializer):
@@ -176,10 +176,16 @@ class BuildingSerializer(serializers.ModelSerializer):
             "name",
             "floor_count",
             "active",
+            "archived_at",
             "operating_hours_start",
             "operating_hours_end",
         ]
-        read_only_fields = ["id", "campus_name", "campus_code"]
+        read_only_fields = ["id", "campus_name", "campus_code", "archived_at"]
+
+    def validate_campus(self, value):
+        if value.archived_at:
+            raise serializers.ValidationError("Hãy khôi phục cơ sở trước khi thêm hoặc chuyển tòa nhà.")
+        return value
 
 
 class RoomSerializer(serializers.ModelSerializer):
@@ -211,6 +217,7 @@ class RoomSerializer(serializers.ModelSerializer):
             "buffer_after_minutes",
             "notes",
             "active",
+            "archived_at",
             "created_at",
         ]
         read_only_fields = [
@@ -219,8 +226,14 @@ class RoomSerializer(serializers.ModelSerializer):
             "campus_id",
             "campus_name",
             "campus_code",
+            "archived_at",
             "created_at",
         ]
+
+    def validate_building(self, value):
+        if value.archived_at or value.campus.archived_at:
+            raise serializers.ValidationError("Hãy khôi phục cơ sở và tòa nhà trước khi thêm hoặc chuyển phòng.")
+        return value
 
 
 class BookingSerializer(serializers.ModelSerializer):
@@ -230,6 +243,8 @@ class BookingSerializer(serializers.ModelSerializer):
     organization_name = serializers.CharField(source="organization.name", read_only=True)
     organization_profile = OrganizationSerializer(source="organization", read_only=True)
     room_name = serializers.CharField(source="room.name", read_only=True)
+    building_name = serializers.CharField(source="room.building.name", read_only=True)
+    campus_name = serializers.CharField(source="room.building.campus.name", read_only=True)
     campus_id = serializers.IntegerField(source="room.building.campus_id", read_only=True)
     building_id = serializers.IntegerField(source="room.building_id", read_only=True)
     created_by_id = serializers.IntegerField(read_only=True)
@@ -243,6 +258,8 @@ class BookingSerializer(serializers.ModelSerializer):
             "organization_profile",
             "room",
             "room_name",
+            "building_name",
+            "campus_name",
             "secondary_room",
             "activity_name",
             "description",
@@ -274,6 +291,8 @@ class BookingSerializer(serializers.ModelSerializer):
             "organization_name",
             "organization_profile",
             "room_name",
+            "building_name",
+            "campus_name",
             "status",
             "physical_status",
             "scan_file_url",

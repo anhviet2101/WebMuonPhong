@@ -29,13 +29,14 @@ export type BookingStatus =
 export type PhysicalStatus =
   "not_submitted" | "submitted" | "confirmed_received";
 
-export type Campus = { id: CampusId; name: string; code: string; address?: string; active?: boolean };
+export type Campus = { id: CampusId; name: string; code: string; address?: string; active?: boolean; archivedAt?: string | null };
 export type Building = {
   id: string;
   campusId: CampusId;
   name: string;
   code: string;
   active?: boolean;
+  archivedAt?: string | null;
 };
 export type Room = {
   id: string;
@@ -47,6 +48,7 @@ export type Room = {
   rentable: boolean;
   bufferMinutes: number;
   active?: boolean;
+  archivedAt?: string | null;
 };
 export type OrganizationProfile = {
   id?: string;
@@ -65,6 +67,9 @@ export type Booking = {
   activityName: string;
   description: string;
   roomId: string;
+  roomName?: string;
+  buildingName?: string;
+  campusName?: string;
   backupRoomId?: string;
   startAt: string;
   endAt: string;
@@ -148,15 +153,22 @@ type NewBooking = Omit<
 >;
 type Store = {
   campuses: Campus[];
+  archivedCampuses: Campus[];
   buildings: Building[];
+  archivedBuildings: Building[];
   rooms: Room[];
+  archivedRooms: Room[];
   bookings: Booking[];
   blackouts: Blackout[];
   documentTemplates: DocumentTemplate[];
   addCampus: (data: Omit<Campus, "id">) => Promise<void>;
   updateCampus: (id: string, patch: Partial<Campus>) => Promise<void>;
+  archiveCampus: (id: string) => Promise<void>;
+  restoreCampus: (id: string) => Promise<void>;
   addBuilding: (data: Omit<Building, "id">) => Promise<void>;
   updateBuilding: (id: string, patch: Partial<Building>) => Promise<void>;
+  archiveBuilding: (id: string) => Promise<void>;
+  restoreBuilding: (id: string) => Promise<void>;
   addBooking: (data: NewBooking) => Promise<Booking>;
   updateBooking: (id: string, patch: Partial<Booking>) => Promise<void>;
   cancelBooking: (id: string, reason?: string) => Promise<void>;
@@ -164,6 +176,8 @@ type Store = {
   addBlackout: (data: Omit<Blackout, "id">) => Promise<void>;
   addRoom: (data: Omit<Room, "id">) => Promise<void>;
   updateRoom: (id: string, patch: Partial<Room>) => Promise<void>;
+  archiveRoom: (id: string) => Promise<void>;
+  restoreRoom: (id: string) => Promise<void>;
   updateDocumentTemplate: (
     templateType: DocumentTemplate["templateType"],
     patch: Partial<DocumentTemplate>,
@@ -181,8 +195,11 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const admin = Boolean(user && !isClubRole(user.role));
   const [campusList, setCampusList] = useState<Campus[]>([]);
+  const [archivedCampuses, setArchivedCampuses] = useState<Campus[]>([]);
   const [buildingList, setBuildingList] = useState<Building[]>([]);
+  const [archivedBuildings, setArchivedBuildings] = useState<Building[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [archivedRooms, setArchivedRooms] = useState<Room[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [blackouts, setBlackouts] = useState<Blackout[]>([]);
   const [documentTemplates, setDocumentTemplates] = useState<DocumentTemplate[]>([]);
@@ -198,6 +215,9 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     if (!axios.isAxiosError(error)) return "";
 
     const payload = error.response?.data;
+    if (Array.isArray(payload)) {
+      return payload.filter((item) => typeof item === "string" && item.trim()).join(", ");
+    }
     if (typeof payload === "string") {
       return payload.trim();
     }
@@ -225,17 +245,17 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     const detail = extractApiErrorMessage(error);
     toast.error(detail ? `${fallback}: ${detail}` : fallback);
   };
-  const mapCampus = (c: any): Campus => ({ id: String(c.id) as CampusId, code: c.code, name: c.name, address: c.address, active: c.active });
-  const mapBuilding = (b: any): Building => ({ id: String(b.id), campusId: String(b.campus) as CampusId, code: b.campus_code ?? "", name: b.name, active: b.active });
+  const mapCampus = (c: any): Campus => ({ id: String(c.id) as CampusId, code: c.code, name: c.name, address: c.address, active: c.active, archivedAt: c.archived_at });
+  const mapBuilding = (b: any): Building => ({ id: String(b.id), campusId: String(b.campus) as CampusId, code: b.campus_code ?? "", name: b.name, active: b.active, archivedAt: b.archived_at });
   const mapRoom = (r: any): Room => ({
     id: String(r.id), buildingId: String(r.building), name: r.name, floor: r.floor, capacity: r.capacity,
     equipment: (["projector","microphone","ac","whiteboard","sound"] as Equipment[]).filter((e) =>
       e === "projector" ? r.has_projector : e === "microphone" ? r.has_microphone : e === "ac" ? r.has_ac : e === "whiteboard" ? r.has_whiteboard : r.has_sound_system),
-    rentable: r.rentable && r.active, bufferMinutes: Math.max(r.buffer_before_minutes ?? 0, r.buffer_after_minutes ?? 0), active: r.active,
+    rentable: Boolean(r.rentable), bufferMinutes: Math.max(r.buffer_before_minutes ?? 0, r.buffer_after_minutes ?? 0), active: r.active, archivedAt: r.archived_at,
   });
   const mapBooking = (b: any): Booking => ({
     id: String(b.id), clubCode: b.organization?.toString() ?? "", clubName: b.organization_name ?? "CLB",
-    activityName: b.activity_name, description: b.description, roomId: String(b.room), backupRoomId: b.secondary_room ? String(b.secondary_room) : undefined,
+    activityName: b.activity_name, description: b.description, roomId: String(b.room), roomName: b.room_name, buildingName: b.building_name, campusName: b.campus_name, backupRoomId: b.secondary_room ? String(b.secondary_room) : undefined,
     startAt: b.start_time, endAt: b.end_time, participants: b.participant_count, contactPerson: b.contact_person,
     contactPhone: b.contact_phone, contactEmail: b.contact_email,     equipment: Object.entries(b.equipment_request ?? {})
       .filter(([, enabled]) => Boolean(enabled))
@@ -297,6 +317,11 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
       load(api.get(endpoints.campuses), (data: any) => setCampusList((data.results ?? data).map(mapCampus)), "Không thể tải danh sách cơ sở"),
       load(api.get(endpoints.buildings), (data: any) => setBuildingList((data.results ?? data).map(mapBuilding)), "Không thể tải danh sách tòa nhà"),
       load(api.get(endpoints.rooms), (data: any) => setRooms((data.results ?? data).map(mapRoom)), "Không thể tải danh sách phòng"),
+      ...(admin ? [
+        load(api.get(`${endpoints.campuses}?archived=1`), (data: any) => setArchivedCampuses((data.results ?? data).map(mapCampus)), "Không thể tải cơ sở đã xóa"),
+        load(api.get(`${endpoints.buildings}?archived=1`), (data: any) => setArchivedBuildings((data.results ?? data).map(mapBuilding)), "Không thể tải tòa nhà đã xóa"),
+        load(api.get(`${endpoints.rooms}?archived=1`), (data: any) => setArchivedRooms((data.results ?? data).map(mapRoom)), "Không thể tải phòng đã xóa"),
+      ] : []),
       load(api.get(endpoints.bookings), (data: any) => setBookings((data.results ?? data).map(mapBooking)), "Không thể tải danh sách đơn"),
       load(api.get(endpoints.blackouts), (data: any) => setBlackouts((data.results ?? data).map((b: any) => ({ id: String(b.id), roomIds: (b.room_ids ?? []).map(String), scopeType: b.scope_type, buildingId: b.building ? String(b.building) : undefined, floor: b.floor, startAt: b.start_time, endAt: b.end_time, reason: b.reason ?? "", note: b.note }))), "Không thể tải danh sách khóa phòng", { quiet: !admin }),
       load(api.get(endpoints.notifications), (data: any) => setNotifications((data.results ?? data).map(mapNotification)), "Không thể tải thông báo", { quiet: true }),
@@ -349,6 +374,21 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     const timer = window.setInterval(checkExpiringHolds, 60_000);
     return () => window.clearInterval(timer);
   }, [bookings]);
+  const refreshFacilities = async () => {
+    const requests = [
+      api.get(endpoints.campuses), api.get(endpoints.buildings), api.get(endpoints.rooms),
+      api.get(`${endpoints.campuses}?archived=1`),
+      api.get(`${endpoints.buildings}?archived=1`),
+      api.get(`${endpoints.rooms}?archived=1`),
+    ];
+    const results = await Promise.all(requests);
+    setCampusList((results[0].data.results ?? results[0].data).map(mapCampus));
+    setBuildingList((results[1].data.results ?? results[1].data).map(mapBuilding));
+    setRooms((results[2].data.results ?? results[2].data).map(mapRoom));
+    setArchivedCampuses((results[3].data.results ?? results[3].data).map(mapCampus));
+    setArchivedBuildings((results[4].data.results ?? results[4].data).map(mapBuilding));
+    setArchivedRooms((results[5].data.results ?? results[5].data).map(mapRoom));
+  };
   const notify = (
     audience: "club" | "admin",
     title: string,
@@ -370,8 +410,11 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Store>(
     () => ({
       campuses: campusList,
+      archivedCampuses,
       buildings: buildingList,
+      archivedBuildings,
       rooms,
+      archivedRooms,
       bookings,
       blackouts,
       documentTemplates,
@@ -395,6 +438,24 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           setCampusList((items) => items.map((item) => item.id === id ? mapCampus(data) : item));
         } catch (error) {
           showApiError(error, "Không thể cập nhật cơ sở");
+          throw error;
+        }
+      },
+      archiveCampus: async (id) => {
+        try {
+          await api.delete(`${endpoints.campuses}${id}/`);
+          await refreshFacilities();
+        } catch (error) {
+          showApiError(error, "Không thể xóa cơ sở");
+          throw error;
+        }
+      },
+      restoreCampus: async (id) => {
+        try {
+          await api.post(`${endpoints.campuses}${id}/restore/`);
+          await refreshFacilities();
+        } catch (error) {
+          showApiError(error, "Không thể khôi phục cơ sở");
           throw error;
         }
       },
@@ -422,6 +483,24 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           setBuildingList((items) => items.map((item) => item.id === id ? mapBuilding(data) : item));
         } catch (error) {
           showApiError(error, "Không thể cập nhật tòa nhà");
+          throw error;
+        }
+      },
+      archiveBuilding: async (id) => {
+        try {
+          await api.delete(`${endpoints.buildings}${id}/`);
+          await refreshFacilities();
+        } catch (error) {
+          showApiError(error, "Không thể xóa tòa nhà");
+          throw error;
+        }
+      },
+      restoreBuilding: async (id) => {
+        try {
+          await api.post(`${endpoints.buildings}${id}/restore/`);
+          await refreshFacilities();
+        } catch (error) {
+          showApiError(error, "Không thể khôi phục tòa nhà");
           throw error;
         }
       },
@@ -561,6 +640,24 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           throw error;
         }
       },
+      archiveRoom: async (id) => {
+        try {
+          await api.delete(`${endpoints.rooms}${id}/`);
+          await refreshFacilities();
+        } catch (error) {
+          showApiError(error, "Không thể xóa phòng");
+          throw error;
+        }
+      },
+      restoreRoom: async (id) => {
+        try {
+          await api.post(`${endpoints.rooms}${id}/restore/`);
+          await refreshFacilities();
+        } catch (error) {
+          showApiError(error, "Không thể khôi phục phòng");
+          throw error;
+        }
+      },
       updateDocumentTemplate: async (templateType, patch) => {
         try {
           const current = documentTemplates.find((item) => item.templateType === templateType);
@@ -612,7 +709,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [campusList, buildingList, rooms, bookings, blackouts, documentTemplates, supportContact, notifications],
+    [campusList, archivedCampuses, buildingList, archivedBuildings, rooms, archivedRooms, bookings, blackouts, documentTemplates, supportContact, notifications],
   );
   return (
     <StoreContext.Provider value={value}>{children}</StoreContext.Provider>

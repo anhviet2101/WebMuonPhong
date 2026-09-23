@@ -599,7 +599,7 @@ function BookingDetailDialog({
               <div>
                 <p className="text-xs font-medium uppercase text-slate-500">Phòng</p>
                 <p className="font-medium">
-                  {room?.name ?? booking.roomId}
+                  {room?.name ?? booking.roomName ?? booking.roomId}
                   {building ? ` · ${building.name}` : ""}
                 </p>
                 {campus && <p className="text-xs text-slate-500">{campus.name}</p>}
@@ -760,7 +760,7 @@ function MauAPreview({ open, close }: { open: boolean; close: () => void }) {
                       })}
                     </TableCell>
                     <TableCell>
-                      {row.room?.name} - {row.building?.name}
+                      {row.room?.name ?? row.booking.roomName} - {row.building?.name ?? row.booking.buildingName}
                     </TableCell>
                     <TableCell>{row.booking.clubName}</TableCell>
                     <TableCell>{row.booking.note || ""}</TableCell>
@@ -823,7 +823,7 @@ export function ClubDashboard() {
     [detail, setDetail] = useState<Booking | null>(null),
     [mauAOpen, setMauAOpen] = useState(false);
   const roomName = (id: string) =>
-    store.rooms.find((r) => r.id === id)?.name ?? id;
+    store.rooms.find((r) => r.id === id)?.name ?? store.bookings.find((b) => b.roomId === id)?.roomName ?? id;
   return (
     <main className="min-h-screen bg-slate-50">
       <DashboardHeader

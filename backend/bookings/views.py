@@ -8,6 +8,7 @@ from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import FileResponse, Http404
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import mixins, status, viewsets
@@ -381,30 +382,111 @@ class OrganizationViewSet(
         return Response(OrganizationSerializer(organization).data)
 
 
-class CampusViewSet(viewsets.ModelViewSet):
+class FacilityArchiveMixin:
+    parent_archive_filters = ()
+
+    def filter_archive_queryset(self, queryset):
+        if self.action == "list" and self.request.query_params.get("archived") == "1":
+            return queryset.filter(archived_at__isnull=False) if is_admin(self.request.user) else queryset.none()
+        if self.action == "list" or not is_admin(self.request.user):
+            queryset = queryset.filter(archived_at__isnull=True)
+            for field in self.parent_archive_filters:
+                queryset = queryset.filter(**{field: True})
+        return queryset
+
+    def perform_update(self, serializer):
+        if serializer.instance.archived_at:
+            raise ValidationError("Hãy khôi phục địa điểm trước khi chỉnh sửa.")
+        serializer.save()
+
+    def _related_rooms(self, instance):
+        if isinstance(instance, Campus):
+            return Room.objects.filter(building__campus=instance)
+        if isinstance(instance, Building):
+            return Room.objects.filter(building=instance)
+        return Room.objects.filter(pk=instance.pk)
+
+    def destroy(self, request, *args, **kwargs):
+        with transaction.atomic():
+            instance = self.get_queryset().select_for_update().get(pk=self.get_object().pk)
+            if not instance.archived_at:
+                room_ids = list(self._related_rooms(instance).select_for_update().values_list("pk", flat=True))
+                if Booking.objects.filter(
+                    Q(room_id__in=room_ids) | Q(secondary_room_id__in=room_ids),
+                    end_time__gt=timezone.now(),
+                    status__in=[
+                        BookingStatus.DRAFT,
+                        BookingStatus.PENDING_HOLD,
+                        BookingStatus.NEEDS_REVISION,
+                        BookingStatus.APPROVED,
+                        BookingStatus.ROOM_CHANGED,
+                    ],
+                ).exists():
+                    raise ValidationError("Địa điểm còn đơn mượn sắp tới. Hãy xử lý các đơn trước khi xóa.")
+                old_value = self.get_serializer(instance).data
+                instance.was_active_before_archive = instance.active
+                instance.active = False
+                instance.archived_at = timezone.now()
+                instance.save(update_fields=["was_active_before_archive", "active", "archived_at"])
+                AuditLog.objects.create(
+                    user=request.user, action=f"archive_{instance._meta.model_name}",
+                    entity_type=type(instance).__name__, entity_id=str(instance.pk),
+                    old_value=old_value, new_value=self.get_serializer(instance).data,
+                )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        with transaction.atomic():
+            instance = self.get_queryset().select_for_update().get(pk=self.get_object().pk)
+            if isinstance(instance, Building) and instance.campus.archived_at:
+                raise ValidationError("Hãy khôi phục cơ sở trước khi khôi phục tòa nhà.")
+            if isinstance(instance, Room) and (
+                instance.building.archived_at or instance.building.campus.archived_at
+            ):
+                raise ValidationError("Hãy khôi phục cơ sở và tòa nhà trước khi khôi phục phòng.")
+            if instance.archived_at:
+                old_value = self.get_serializer(instance).data
+                instance.active = instance.was_active_before_archive
+                instance.archived_at = None
+                instance.save(update_fields=["active", "archived_at"])
+                AuditLog.objects.create(
+                    user=request.user, action=f"restore_{instance._meta.model_name}",
+                    entity_type=type(instance).__name__, entity_id=str(instance.pk),
+                    old_value=old_value, new_value=self.get_serializer(instance).data,
+                )
+        return Response(self.get_serializer(instance).data)
+
+
+class CampusViewSet(FacilityArchiveMixin, viewsets.ModelViewSet):
     queryset = Campus.objects.all()
     serializer_class = CampusSerializer
     permission_classes = [IsAuthenticated, AdminWriteOrReadOnly]
     write_permission_key = "campus.manage"
 
+    def get_queryset(self):
+        return self.filter_archive_queryset(Campus.objects.all())
 
-class BuildingViewSet(viewsets.ModelViewSet):
+
+class BuildingViewSet(FacilityArchiveMixin, viewsets.ModelViewSet):
     serializer_class = BuildingSerializer
     permission_classes = [IsAuthenticated, AdminWriteOrReadOnly]
     write_permission_key = "building.manage"
+    parent_archive_filters = ("campus__archived_at__isnull",)
 
     def get_queryset(self):
         queryset = Building.objects.select_related("campus").all()
         campus_id = self.request.query_params.get("campus_id")
         if campus_id:
             queryset = queryset.filter(campus_id=campus_id)
-        return queryset
+        return self.filter_archive_queryset(queryset)
 
 
-class RoomViewSet(viewsets.ModelViewSet):
+class RoomViewSet(FacilityArchiveMixin, viewsets.ModelViewSet):
     serializer_class = RoomSerializer
     permission_classes = [IsAuthenticated, AdminWriteOrReadOnly]
     write_permission_key = "room.manage"
+    parent_archive_filters = ("building__archived_at__isnull", "building__campus__archived_at__isnull")
 
     def get_queryset(self):
         queryset = Room.objects.select_related("building", "building__campus").all()
@@ -423,7 +505,7 @@ class RoomViewSet(viewsets.ModelViewSet):
         if rentable is not None:
             queryset = queryset.filter(rentable=_parse_bool(rentable))
 
-        return queryset
+        return self.filter_archive_queryset(queryset)
 
     @action(detail=False, methods=["get"], url_path="available")
     def available(self, request):

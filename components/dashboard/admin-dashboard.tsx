@@ -328,7 +328,7 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
                       })}
                     </TableCell>
                     <TableCell>
-                      {row.room?.name} - {row.building?.name}
+                      {row.room?.name ?? row.booking.roomName} - {row.building?.name ?? row.booking.buildingName}
                     </TableCell>
                     <TableCell>
                       <button className="font-semibold text-blue-700 hover:underline" onClick={() => openClubProfile(row.booking)}>{row.booking.clubName}</button>
@@ -629,6 +629,7 @@ function ClubProfileDialog({ booking, close }: { booking: Booking | null; close:
 
 function Facility() {
   const store = usePrototypeStore();
+  const [showArchived, setShowArchived] = useState(false);
   const [campusId, setCampusId] = useState(store.campuses[0]?.id ?? "");
   const campusBuildings = store.buildings.filter((item) => item.campusId === campusId);
   const [buildingId, setBuildingId] = useState(campusBuildings[0]?.id ?? "");
@@ -636,6 +637,11 @@ function Facility() {
   const [campusForm, setCampusForm] = useState<Campus | null>(null);
   const [buildingForm, setBuildingForm] = useState<Building | null>(null);
   const [roomForm, setRoomForm] = useState<Room | null>(null);
+  useEffect(() => {
+    if (!store.campuses.some((item) => item.id === campusId)) {
+      setCampusId(store.campuses[0]?.id ?? "");
+    }
+  }, [campusId, store.campuses]);
   useEffect(() => {
     if (campusId && !campusBuildings.some((item) => item.id === buildingId)) {
       setBuildingId(campusBuildings[0]?.id ?? "");
@@ -646,6 +652,24 @@ function Facility() {
   const openNewCampus = () => setCampusForm({ id: "", code: "", name: "", address: "", active: true });
   const openNewBuilding = () => setBuildingForm({ id: "", campusId, code: "", name: "", active: true });
   const openNewRoom = () => setRoomForm({ id: "", buildingId, name: "", capacity: 50, equipment: ["projector", "ac", "whiteboard"], rentable: true, bufferMinutes: 15, active: true });
+  const archive = async (kind: "campus" | "building" | "room", id: string, name: string) => {
+    const label = kind === "campus" ? "cơ sở" : kind === "building" ? "tòa nhà" : "phòng";
+    if (!window.confirm(`Xóa ${label} "${name}"? Đơn cũ vẫn được giữ. Các địa điểm bên dưới sẽ tạm ẩn.`)) return;
+    try {
+      if (kind === "campus") await store.archiveCampus(id);
+      else if (kind === "building") await store.archiveBuilding(id);
+      else await store.archiveRoom(id);
+      toast.success(`Đã xóa ${label}`);
+    } catch { /* Lỗi đã hiển thị trong store. */ }
+  };
+  const restore = async (kind: "campus" | "building" | "room", id: string) => {
+    try {
+      if (kind === "campus") await store.restoreCampus(id);
+      else if (kind === "building") await store.restoreBuilding(id);
+      else await store.restoreRoom(id);
+      toast.success("Đã khôi phục địa điểm");
+    } catch { /* Lỗi đã hiển thị trong store. */ }
+  };
 
   const saveCampus = async () => {
     if (!campusForm?.name.trim() || !campusForm.code.trim()) return toast.error("Nhập tên và mã cơ sở");
@@ -670,45 +694,45 @@ function Facility() {
   };
 
   return (
+    <div className="space-y-4">
+    <div className="flex justify-end"><Button variant="outline" onClick={() => setShowArchived((value) => !value)}>{showArchived ? "Xem đang dùng" : "Xem đã xóa"}</Button></div>
     <div className="grid gap-4 xl:grid-cols-3">
       <Card>
         <CardHeader><CardTitle>Cơ sở / Giảng đường</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <Button onClick={openNewCampus}><Plus />Thêm cơ sở</Button>
-          {store.campuses.map((item) => (
-            <button key={item.id} onClick={() => setCampusId(item.id)} className={`w-full rounded-md border p-3 text-left ${campusId === item.id ? "border-blue-500 bg-blue-50" : "bg-white"}`}>
-              <b>{item.code} · {item.name}</b>
-              <p className="text-xs text-slate-500">{toggle(item.active !== false)}</p>
-              <span className="mt-2 inline-block text-xs text-blue-700" onClick={(event) => { event.stopPropagation(); setCampusForm(item); }}>Sửa</span>
-            </button>
+          {!showArchived && <Button onClick={openNewCampus}><Plus />Thêm cơ sở</Button>}
+          {(showArchived ? store.archivedCampuses : store.campuses).map((item) => (
+            <div key={item.id} className={`rounded-md border p-3 ${!showArchived && campusId === item.id ? "border-blue-500 bg-blue-50" : "bg-white"}`}>
+              <button className="w-full text-left" onClick={() => !showArchived && setCampusId(item.id)}><b>{item.code} · {item.name}</b><p className="text-xs text-slate-500">{showArchived ? "Đã xóa" : toggle(item.active !== false)}</p></button>
+              <div className="mt-2 flex gap-2">{showArchived ? <Button size="sm" variant="outline" onClick={() => void restore("campus", item.id)}>Khôi phục</Button> : <><Button size="sm" variant="outline" onClick={() => setCampusForm(item)}>Sửa</Button><Button size="sm" variant="destructive" onClick={() => void archive("campus", item.id, item.name)}>Xóa</Button></>}</div>
+            </div>
           ))}
         </CardContent>
       </Card>
       <Card>
         <CardHeader><CardTitle>Tòa nhà</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <Button disabled={!campusId} onClick={openNewBuilding}><Plus />Thêm tòa nhà</Button>
-          {campusBuildings.map((item) => (
-            <button key={item.id} onClick={() => setBuildingId(item.id)} className={`w-full rounded-md border p-3 text-left ${buildingId === item.id ? "border-blue-500 bg-blue-50" : "bg-white"}`}>
-              <b>{item.name}</b>
-              <p className="text-xs text-slate-500">{toggle(item.active !== false)}</p>
-              <span className="mt-2 inline-block text-xs text-blue-700" onClick={(event) => { event.stopPropagation(); setBuildingForm(item); }}>Sửa</span>
-            </button>
+          {!showArchived && <Button disabled={!campusId} onClick={openNewBuilding}><Plus />Thêm tòa nhà</Button>}
+          {(showArchived ? store.archivedBuildings : campusBuildings).map((item) => (
+            <div key={item.id} className={`rounded-md border p-3 ${!showArchived && buildingId === item.id ? "border-blue-500 bg-blue-50" : "bg-white"}`}>
+              <button className="w-full text-left" onClick={() => !showArchived && setBuildingId(item.id)}><b>{item.name}</b><p className="text-xs text-slate-500">{showArchived ? `Đã xóa · ${[...store.campuses, ...store.archivedCampuses].find((campus) => campus.id === item.campusId)?.name ?? "Cơ sở"}` : toggle(item.active !== false)}</p></button>
+              <div className="mt-2 flex gap-2">{showArchived ? <Button size="sm" variant="outline" onClick={() => void restore("building", item.id)}>Khôi phục</Button> : <><Button size="sm" variant="outline" onClick={() => setBuildingForm(item)}>Sửa</Button><Button size="sm" variant="destructive" onClick={() => void archive("building", item.id, item.name)}>Xóa</Button></>}</div>
+            </div>
           ))}
         </CardContent>
       </Card>
       <Card>
         <CardHeader><CardTitle>Phòng</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <Button disabled={!buildingId} onClick={openNewRoom}><Plus />Thêm phòng</Button>
-          {visibleRooms.map((item) => (
+          {!showArchived && <Button disabled={!buildingId} onClick={openNewRoom}><Plus />Thêm phòng</Button>}
+          {(showArchived ? store.archivedRooms : visibleRooms).map((item) => (
             <div key={item.id} className="rounded-md border bg-white p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <b>{item.name}</b>
-                  <p className="text-xs text-slate-500">{item.capacity === null ? "Chưa cập nhật sức chứa" : `${item.capacity} người`} · Buffer {item.bufferMinutes} phút · {item.rentable ? "Cho mượn" : "Tạm ngưng"}</p>
+                  <p className="text-xs text-slate-500">{showArchived ? `Đã xóa · ${[...store.buildings, ...store.archivedBuildings].find((building) => building.id === item.buildingId)?.name ?? "Tòa nhà"}` : `${item.capacity === null ? "Chưa cập nhật sức chứa" : `${item.capacity} người`} · Buffer ${item.bufferMinutes} phút · ${item.rentable ? "Cho mượn" : "Tạm ngưng"}`}</p>
                 </div>
-                <Button size="sm" variant="outline" onClick={() => setRoomForm(item)}>Sửa</Button>
+                <div className="flex gap-2">{showArchived ? <Button size="sm" variant="outline" onClick={() => void restore("room", item.id)}>Khôi phục</Button> : <><Button size="sm" variant="outline" onClick={() => setRoomForm(item)}>Sửa</Button><Button size="sm" variant="destructive" onClick={() => void archive("room", item.id, item.name)}>Xóa</Button></>}</div>
               </div>
             </div>
           ))}
@@ -759,6 +783,7 @@ function Facility() {
           <DialogFooter><Button variant="outline" onClick={() => setRoomForm(null)}>Hủy</Button><Button onClick={saveRoom}>Lưu</Button></DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
     </div>
   );
 }
@@ -1043,7 +1068,7 @@ export function AdminDashboard() {
                             </p>
                           </TableCell>
                           <TableCell>
-                            {store.rooms.find((r) => r.id === b.roomId)?.name}
+                            {store.rooms.find((r) => r.id === b.roomId)?.name ?? b.roomName}
                             <p className="text-xs text-slate-500">
                               {fmt(b.startAt)}
                             </p>

@@ -154,7 +154,7 @@ export async function exportScheduleDocx(
           children: [
             cell(String(index + 1), 600, false, options.redDynamicText ? "C00000" : "000000"),
             cell(timeText(row), 3100, false, options.redDynamicText ? "C00000" : "000000"),
-            cell(`${row.room?.name ?? ""} - ${row.building?.name ?? row.campus?.name ?? ""}`, 1800, false, options.redDynamicText ? "C00000" : "000000"),
+            cell(`${row.room?.name ?? row.booking.roomName ?? ""} - ${row.building?.name ?? row.booking.buildingName ?? row.campus?.name ?? row.booking.campusName ?? ""}`, 1800, false, options.redDynamicText ? "C00000" : "000000"),
             cell(row.booking.clubName, 2500, false, options.redDynamicText ? "C00000" : "000000"),
             cell(row.booking.note ?? "", 1360, false, options.redDynamicText ? "C00000" : "000000"),
           ],
@@ -228,7 +228,7 @@ export function printSchedule(
   const body = rows
     .map(
       (row, i) =>
-        `<tr class="${options.redDynamicText ? "dynamic" : ""}"><td>${i + 1}</td><td>${escape(timeText(row))}</td><td>${escape(`${row.room?.name ?? ""} - ${row.building?.name ?? ""}`)}</td><td>${escape(row.booking.clubName)}</td><td>${escape(row.booking.note ?? "")}</td></tr>`,
+        `<tr class="${options.redDynamicText ? "dynamic" : ""}"><td>${i + 1}</td><td>${escape(timeText(row))}</td><td>${escape(`${row.room?.name ?? row.booking.roomName ?? ""} - ${row.building?.name ?? row.booking.buildingName ?? ""}`)}</td><td>${escape(row.booking.clubName)}</td><td>${escape(row.booking.note ?? "")}</td></tr>`,
     )
     .join("");
   const win = window.open("", "_blank");

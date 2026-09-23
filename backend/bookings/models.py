@@ -131,6 +131,8 @@ class Campus(models.Model):
     code = models.CharField(max_length=20, unique=True)
     address = models.TextField(blank=True)
     active = models.BooleanField(default=True)
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    was_active_before_archive = models.BooleanField(default=True)
 
     class Meta:
         ordering = ["name"]
@@ -145,6 +147,8 @@ class Building(models.Model):
     name = models.CharField(max_length=255)
     floor_count = models.PositiveSmallIntegerField(validators=[MinValueValidator(1)])
     active = models.BooleanField(default=True)
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    was_active_before_archive = models.BooleanField(default=True)
     operating_hours_start = models.TimeField(null=True, blank=True)
     operating_hours_end = models.TimeField(null=True, blank=True)
 
@@ -179,6 +183,8 @@ class Room(models.Model):
     buffer_after_minutes = models.PositiveSmallIntegerField(default=15)
     notes = models.TextField(blank=True)
     active = models.BooleanField(default=True)
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    was_active_before_archive = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
