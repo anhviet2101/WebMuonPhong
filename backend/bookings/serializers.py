@@ -35,9 +35,10 @@ class OrganizationSerializer(serializers.ModelSerializer):
             "contact_email",
             "fanpage_url",
             "active",
+            "archived_at",
             "created_at",
         ]
-        read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "archived_at", "created_at"]
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -95,14 +96,16 @@ class UserAdminSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
     must_change_password = serializers.BooleanField(required=False)
     role_name = serializers.SerializerMethodField()
+    archived_at = serializers.DateTimeField(source="booking_profile.archived_at", read_only=True)
 
     class Meta:
         model = User
         fields = [
             "id", "username", "email", "first_name", "last_name", "is_active",
             "role", "role_name", "organization", "password", "must_change_password",
+            "archived_at",
         ]
-        read_only_fields = ["id", "role_name"]
+        read_only_fields = ["id", "role_name", "archived_at"]
 
     def get_role_name(self, obj):
         profile = getattr(obj, "booking_profile", None)

@@ -25,6 +25,7 @@ export type AuthUser = {
 export type OrganizationProfile = {
   id?: string;
   active?: boolean;
+  archived_at?: string | null;
   name: string;
   abbreviation?: string;
   address: string;
@@ -38,7 +39,7 @@ export type UserProfile = AuthUser & {
   phone?: string;
   title?: string;
 };
-export type UserRecord = UserProfile & { lastLogin?: string; dateJoined?: string };
+export type UserRecord = UserProfile & { lastLogin?: string; dateJoined?: string; archivedAt?: string | null };
 export type LoginResponse = {
   access: string;
   refresh?: string;
@@ -162,10 +163,14 @@ export const authApi = {
     api.patch<OrganizationProfile>(endpoints.organizationProfile, data),
   changePassword: (currentPassword: string, newPassword: string) =>
     api.post<AuthTokens>(endpoints.changePassword, { old_password: currentPassword, new_password: newPassword }),
-  listUsers: () => api.get<{ results?: UserRecord[] } | UserRecord[]>(endpoints.users),
+  listUsers: (archived = false) => api.get<{ results?: UserRecord[] } | UserRecord[]>(
+    archived ? `${endpoints.users}?archived=1` : endpoints.users,
+  ),
   createUser: (data: Record<string, unknown>) => api.post<UserRecord & { password?: string }>(endpoints.users, data),
   toggleUser: (id: string, isActive: boolean) => api.patch<UserRecord>(`${endpoints.users}/${id}`, { is_active: isActive }),
   resetUserPassword: (id: string) => api.post<{ password?: string }>(`${endpoints.users}/${id}/reset-password`),
+  archiveUser: (id: string) => api.delete(`${endpoints.users}/${id}`),
+  restoreUser: (id: string) => api.post<UserRecord>(`${endpoints.users}/${id}/restore`),
 };
 
 export default api;

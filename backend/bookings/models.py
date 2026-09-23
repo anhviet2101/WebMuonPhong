@@ -48,6 +48,7 @@ class Organization(models.Model):
     contact_email = models.EmailField(blank=True)
     fanpage_url = models.URLField(blank=True)
     active = models.BooleanField(default=True)
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -118,6 +119,8 @@ class UserProfile(models.Model):
         related_name="user_profiles",
     )
     must_change_password = models.BooleanField(default=False)
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    was_active_before_archive = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.user} - {self.role}"

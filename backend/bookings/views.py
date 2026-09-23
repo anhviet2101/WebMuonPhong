@@ -154,6 +154,10 @@ class AdminUserListView(APIView):
 
     def get(self, request):
         queryset = User.objects.select_related("booking_profile__role", "booking_profile__organization")
+        if request.query_params.get("archived") == "1":
+            queryset = queryset.filter(booking_profile__archived_at__isnull=False)
+        else:
+            queryset = queryset.filter(booking_profile__archived_at__isnull=True)
         organization_id = request.query_params.get("organization_id")
         if not is_admin(request.user) or not user_has_permission(request.user, "organization.manage"):
             queryset = queryset.filter(booking_profile__organization_id=get_user_organization_id(request.user))
@@ -197,6 +201,8 @@ class AdminUserDetailView(APIView):
 
     def patch(self, request, pk):
         user = self._get_user(request, pk)
+        if getattr(user, "booking_profile", None) and user.booking_profile.archived_at:
+            raise ValidationError("Hãy khôi phục tài khoản trước khi chỉnh sửa.")
         old_value = _user_audit_snapshot(user)
         serializer = UserAdminSerializer(user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -219,11 +225,34 @@ class AdminUserDetailView(APIView):
         return Response(UserAdminSerializer(user).data)
 
     def post(self, request, pk):
+        if request.resolver_match.url_name == "admin-user-restore":
+            with transaction.atomic():
+                user = self._get_user(request, pk)
+                organization_id = UserProfile.objects.filter(user=user).values_list(
+                    "organization_id", flat=True
+                ).first()
+                organization = (
+                    Organization.objects.select_for_update().filter(pk=organization_id).first()
+                    if organization_id else None
+                )
+                profile = UserProfile.objects.select_for_update().select_related(
+                    "user", "role"
+                ).filter(user=user).first()
+                if not profile or profile.role.name != "CLB_REP" or user.is_superuser or user.is_staff:
+                    raise PermissionDenied("Chỉ khôi phục tài khoản đại diện CLB ở đây.")
+                if not profile.archived_at:
+                    return Response(UserAdminSerializer(profile.user).data)
+                if not organization or not organization.active or organization.archived_at:
+                    raise ValidationError("Hãy khôi phục CLB trước khi khôi phục tài khoản.")
+                restored_user = _restore_club_profile(profile, request.user)
+                return Response(UserAdminSerializer(restored_user).data)
         if not request.resolver_match.url_name.endswith("reset-password") and (
             request.resolver_match.url_name != "admin-user-reset-password-alias"
         ):
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
         user = self._get_user(request, pk)
+        if getattr(user, "booking_profile", None) and user.booking_profile.archived_at:
+            raise ValidationError("Hãy khôi phục tài khoản trước khi đặt lại mật khẩu.")
         password = request.data.get("password") or f"UET@{get_random_string(8)}"
         validate_password(password, user)
         user.set_password(password)
@@ -240,6 +269,18 @@ class AdminUserDetailView(APIView):
             new_value={"must_change_password": True},
         )
         return Response({"detail": "Đã đặt lại mật khẩu.", "password": password})
+
+    def delete(self, request, pk):
+        with transaction.atomic():
+            user = self._get_user(request, pk)
+            profile = UserProfile.objects.select_for_update().select_related(
+                "user", "role"
+            ).filter(user=user).first()
+            if not profile or profile.role.name != "CLB_REP" or user.is_superuser or user.is_staff:
+                raise PermissionDenied("Chỉ được xóa tài khoản đại diện CLB.")
+            if not profile.archived_at:
+                _archive_club_profile(profile, request.user, timezone.now())
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _get_user(self, request, pk):
         user = User.objects.select_related("booking_profile").filter(pk=pk).first()
@@ -262,6 +303,13 @@ class OrganizationViewSet(
     serializer_class = OrganizationSerializer
     permission_classes = [IsAuthenticated, IsAdminRole, HasPermission("organization.manage")]
 
+    def get_queryset(self):
+        queryset = Organization.objects.all()
+        if self.action == "list":
+            archived = self.request.query_params.get("archived") == "1"
+            queryset = queryset.filter(archived_at__isnull=not archived)
+        return queryset
+
     def perform_create(self, serializer):
         organization = serializer.save()
         AuditLog.objects.create(
@@ -274,6 +322,8 @@ class OrganizationViewSet(
 
     def perform_update(self, serializer):
         organization = self.get_object()
+        if organization.archived_at:
+            raise ValidationError("Hãy khôi phục CLB trước khi chỉnh sửa.")
         old_value = OrganizationSerializer(organization).data
         organization = serializer.save()
         AuditLog.objects.create(
@@ -284,6 +334,51 @@ class OrganizationViewSet(
             old_value=old_value,
             new_value=OrganizationSerializer(organization).data,
         )
+
+    def destroy(self, request, *args, **kwargs):
+        with transaction.atomic():
+            organization = Organization.objects.select_for_update().get(pk=self.get_object().pk)
+            if not organization.archived_at:
+                old_value = OrganizationSerializer(organization).data
+                archived_at = timezone.now()
+                organization.active = False
+                organization.archived_at = archived_at
+                organization.save(update_fields=["active", "archived_at"])
+                profiles = UserProfile.objects.select_for_update().select_related("user", "role").filter(
+                    organization=organization,
+                    role__name="CLB_REP",
+                    archived_at__isnull=True,
+                )
+                for profile in profiles:
+                    _archive_club_profile(profile, request.user, archived_at)
+                AuditLog.objects.create(
+                    user=request.user,
+                    action="archive_organization",
+                    entity_type="Organization",
+                    entity_id=str(organization.pk),
+                    old_value=old_value,
+                    new_value=OrganizationSerializer(organization).data,
+                )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        with transaction.atomic():
+            organization = Organization.objects.select_for_update().get(pk=self.get_object().pk)
+            if organization.archived_at:
+                old_value = OrganizationSerializer(organization).data
+                organization.active = True
+                organization.archived_at = None
+                organization.save(update_fields=["active", "archived_at"])
+                AuditLog.objects.create(
+                    user=request.user,
+                    action="restore_organization",
+                    entity_type="Organization",
+                    entity_id=str(organization.pk),
+                    old_value=old_value,
+                    new_value=OrganizationSerializer(organization).data,
+                )
+        return Response(OrganizationSerializer(organization).data)
 
 
 class CampusViewSet(viewsets.ModelViewSet):
@@ -887,7 +982,44 @@ def _user_audit_snapshot(user):
         "role": profile.role.name if profile else None,
         "organization_id": profile.organization_id if profile else None,
         "must_change_password": profile.must_change_password if profile else False,
+        "archived_at": profile.archived_at.isoformat() if profile and profile.archived_at else None,
     }
+
+
+def _archive_club_profile(profile, actor, archived_at):
+    user = profile.user
+    old_value = _user_audit_snapshot(user)
+    profile.was_active_before_archive = user.is_active
+    profile.archived_at = archived_at
+    profile.save(update_fields=["was_active_before_archive", "archived_at"])
+    user.is_active = False
+    user.save(update_fields=["is_active"])
+    AuditLog.objects.create(
+        user=actor,
+        action="archive_user",
+        entity_type="User",
+        entity_id=str(user.pk),
+        old_value=old_value,
+        new_value=_user_audit_snapshot(user),
+    )
+
+
+def _restore_club_profile(profile, actor):
+    user = profile.user
+    old_value = _user_audit_snapshot(user)
+    profile.archived_at = None
+    profile.save(update_fields=["archived_at"])
+    user.is_active = profile.was_active_before_archive
+    user.save(update_fields=["is_active"])
+    AuditLog.objects.create(
+        user=actor,
+        action="restore_user",
+        entity_type="User",
+        entity_id=str(user.pk),
+        old_value=old_value,
+        new_value=_user_audit_snapshot(user),
+    )
+    return user
 
 
 __all__ = [

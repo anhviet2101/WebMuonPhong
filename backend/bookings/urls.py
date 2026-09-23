@@ -50,6 +50,7 @@ urlpatterns = [
     path("auth/organization", OrganizationProfileView.as_view(), name="auth-organization"),
     path("users", AdminUserListView.as_view(), name="admin-user-list"),
     path("users/<int:pk>", AdminUserDetailView.as_view(), name="admin-user-detail"),
+    path("users/<int:pk>/restore", AdminUserDetailView.as_view(), name="admin-user-restore"),
     path(
         "users/<int:pk>/reset-password",
         AdminUserDetailView.as_view(),
