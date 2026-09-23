@@ -28,6 +28,7 @@ from backend.bookings.services.booking_service import (
     change_room,
     confirm_physical,
     submit_booking,
+    upload_scan,
 )
 from backend.bookings.tasks import (
     auto_complete_past_bookings,
@@ -336,12 +337,16 @@ class BookingApiTests(APITestCase):
             "default": {"BACKEND": "django.core.files.storage.InMemoryStorage"},
             "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
         }):
-            storage_path = default_storage.save(
-                f"booking-scans/{booking.id}/application.pdf",
-                ContentFile(b"%PDF-1.4\n%%EOF"),
+            upload_scan(
+                booking,
+                ContentFile(b"%PDF-1.4\n%%EOF", name="application.pdf"),
+                self.user,
             )
-            booking.scan_file_url = default_storage.url(storage_path)
-            booking.save(update_fields=["scan_file_url"])
+            booking.refresh_from_db()
+            self.assertTrue(booking.scan_file_url.startswith("/media/"))
+            self.assertTrue(
+                default_storage.exists(booking.scan_file_url.removeprefix("/media/"))
+            )
 
             self.client.force_authenticate(self.user)
             allowed = self.client.get(reverse("booking-scan", args=[booking.id]))

@@ -1,6 +1,8 @@
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import quote
 
+from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.files.storage import default_storage
 from django.core.mail import send_mail
@@ -333,7 +335,11 @@ def upload_scan(booking, file, user=None):
                 file,
             )
 
-            locked_booking.scan_file_url = default_storage.url(saved_path)
+            # Keep the object key behind the authenticated booking scan endpoint.
+            # An S3 storage URL could otherwise expose a temporary signed URL.
+            locked_booking.scan_file_url = (
+                settings.MEDIA_URL.rstrip("/") + "/" + quote(saved_path, safe="/")
+            )
             locked_booking.physical_status = SUBMITTED
             locked_booking.physical_submitted_at = timezone.now()
             locked_booking.save(

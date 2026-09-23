@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 
@@ -40,8 +42,6 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
-
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 ROOT_URLCONF = "backend.urls"
 
@@ -90,6 +90,63 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "OPTIONS": {"location": MEDIA_ROOT, "base_url": MEDIA_URL},
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+_storage_keys = (
+    "SUPABASE_S3_ENDPOINT",
+    "SUPABASE_S3_REGION",
+    "SUPABASE_S3_BUCKET",
+    "SUPABASE_S3_ACCESS_KEY_ID",
+    "SUPABASE_S3_SECRET_ACCESS_KEY",
+)
+if any(key in os.environ for key in _storage_keys):
+    _storage_values = {key: os.getenv(key, "") for key in _storage_keys}
+    _missing_storage_keys = [key for key, value in _storage_values.items() if not value]
+    if _missing_storage_keys:
+        raise ImproperlyConfigured(
+            "Missing Supabase S3 settings: " + ", ".join(_missing_storage_keys)
+        )
+
+    _storage_endpoint = _storage_values["SUPABASE_S3_ENDPOINT"].rstrip("/")
+    _parsed_endpoint = urlparse(_storage_endpoint)
+    if (
+        _parsed_endpoint.scheme != "https"
+        or not _parsed_endpoint.hostname
+        or _parsed_endpoint.username
+        or _parsed_endpoint.password
+        or _parsed_endpoint.query
+        or _parsed_endpoint.fragment
+    ):
+        raise ImproperlyConfigured("SUPABASE_S3_ENDPOINT must be an HTTPS URL.")
+
+    from botocore.config import Config
+
+    STORAGES["default"] = {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": _storage_values["SUPABASE_S3_BUCKET"],
+            "region_name": _storage_values["SUPABASE_S3_REGION"],
+            "endpoint_url": _storage_endpoint,
+            "access_key": _storage_values["SUPABASE_S3_ACCESS_KEY_ID"],
+            "secret_key": _storage_values["SUPABASE_S3_SECRET_ACCESS_KEY"],
+            "default_acl": None,
+            "file_overwrite": False,
+            "client_config": Config(
+                s3={"addressing_style": "path"},
+                signature_version="s3v4",
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
+        },
+    }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 EMAIL_BACKEND = os.getenv(
