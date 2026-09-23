@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { authApi, clearAuthTokens, getAccessToken, setAuthTokens, type LoginResponse, type UserProfile } from "@/lib/api";
+import { authApi, changePasswordErrorMessage, clearAuthTokens, getAccessToken, setAuthTokens, type LoginResponse, type UserProfile } from "@/lib/api";
 
 type AuthContextValue = {
   user: UserProfile | null;
@@ -127,12 +127,16 @@ function PasswordGate() {
     if (next.length < 8 || next !== confirm) return toast.error("Mật khẩu mới tối thiểu 8 ký tự và phải trùng nhau.");
     setSaving(true);
     try {
-      await authApi.changePassword(current, next);
+      const { data } = await authApi.changePassword(current, next);
+      setAuthTokens(data.access, data.refresh);
       setUser({ ...user!, mustChangePassword: false });
       setManualOpen(false);
+      setCurrent("");
+      setNext("");
+      setConfirm("");
       toast.success("Đã đổi mật khẩu. Bạn có thể tiếp tục sử dụng hệ thống.");
-    } catch {
-      toast.error("Không thể đổi mật khẩu. Vui lòng kiểm tra mật khẩu hiện tại.");
+    } catch (error) {
+      toast.error(changePasswordErrorMessage(error));
     } finally { setSaving(false); }
   };
   return <Dialog open={open}><DialogContent onPointerDownOutside={(event) => event.preventDefault()} onEscapeKeyDown={(event) => event.preventDefault()}>

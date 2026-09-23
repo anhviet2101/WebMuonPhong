@@ -133,15 +133,35 @@ export const endpoints = {
   auditLogs: "/audit-logs/",
 };
 
+type AuthTokens = { access: string; refresh?: string };
+
+export function changePasswordErrorMessage(error: unknown): string {
+  if (!axios.isAxiosError(error)) return "Không thể đổi mật khẩu. Vui lòng thử lại.";
+  const data = error.response?.data;
+  if (data && typeof data === "object") {
+    const details = data as Record<string, unknown>;
+    for (const key of ["old_password", "new_password", "detail", "non_field_errors"]) {
+      const value = details[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (Array.isArray(value)) {
+        const message = value.find((item): item is string => typeof item === "string" && !!item.trim());
+        if (message) return message;
+      }
+    }
+  }
+  if (error.response) return `Không thể đổi mật khẩu (HTTP ${error.response.status}).`;
+  return "Không kết nối được máy chủ. Vui lòng thử lại.";
+}
+
 export const authApi = {
   login: (username: string, password: string) =>
     api.post<LoginResponse>(endpoints.authLogin, { username, password }),
-  me: () => api.get<UserProfile>(`${endpoints.me}/`),
-  updateProfile: (data: Partial<UserProfile>) => api.patch<UserProfile>(`${endpoints.profile}/`, data),
+  me: () => api.get<UserProfile>(endpoints.me),
+  updateProfile: (data: Partial<UserProfile>) => api.patch<UserProfile>(endpoints.profile, data),
   updateOrganization: (data: Partial<OrganizationProfile>) =>
-    api.patch<OrganizationProfile>(`${endpoints.organizationProfile}/`, data),
+    api.patch<OrganizationProfile>(endpoints.organizationProfile, data),
   changePassword: (currentPassword: string, newPassword: string) =>
-    api.post(`${endpoints.changePassword}/`, { old_password: currentPassword, new_password: newPassword }),
+    api.post<AuthTokens>(endpoints.changePassword, { old_password: currentPassword, new_password: newPassword }),
   listUsers: () => api.get<{ results?: UserRecord[] } | UserRecord[]>(endpoints.users),
   createUser: (data: Record<string, unknown>) => api.post<UserRecord & { password?: string }>(endpoints.users, data),
   toggleUser: (id: string, isActive: boolean) => api.patch<UserRecord>(`${endpoints.users}/${id}`, { is_active: isActive }),

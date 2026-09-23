@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { authApi, type OrganizationProfile } from "@/lib/api";
+import { authApi, changePasswordErrorMessage, setAuthTokens, type OrganizationProfile } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -13,7 +13,7 @@ export function ProfilePage() {
   const [passwords, setPasswords] = useState({ current: "", next: "", confirm: "" });
   useEffect(() => { if (user?.organization) setOrganization({ ...user.organization, name: user.organization.name ?? "", address: user.organization.address ?? "", contact_email: user.organization.contact_email ?? "" }); }, [user]);
   const saveOrganization = async (event: React.FormEvent) => { event.preventDefault(); try { await authApi.updateOrganization({ representative_name: organization.representative_name, hotline: organization.hotline, contact_email: organization.contact_email, fanpage_url: organization.fanpage_url }); await refreshProfile(); toast.success("Đã lưu thông tin CLB."); } catch { toast.error("Không thể lưu thông tin CLB."); } };
-  const changePassword = async (event: React.FormEvent) => { event.preventDefault(); if (passwords.next.length < 8 || passwords.next !== passwords.confirm) return toast.error("Mật khẩu mới tối thiểu 8 ký tự và phải trùng nhau."); try { await authApi.changePassword(passwords.current, passwords.next); setPasswords({ current: "", next: "", confirm: "" }); toast.success("Đã đổi mật khẩu."); } catch { toast.error("Mật khẩu hiện tại không đúng."); } };
+  const changePassword = async (event: React.FormEvent) => { event.preventDefault(); if (passwords.next.length < 8 || passwords.next !== passwords.confirm) return toast.error("Mật khẩu mới tối thiểu 8 ký tự và phải trùng nhau."); try { const { data } = await authApi.changePassword(passwords.current, passwords.next); setAuthTokens(data.access, data.refresh); setPasswords({ current: "", next: "", confirm: "" }); await refreshProfile(); toast.success("Đã đổi mật khẩu."); } catch (error) { toast.error(changePasswordErrorMessage(error)); } };
   if (!user) return null;
   const field = (key: "representative_name" | "hotline" | "contact_email" | "fanpage_url", label: string) => <div className="grid gap-2"><Label>{label}</Label><Input value={organization[key] ?? ""} onChange={(e) => setOrganization({ ...organization, [key]: e.target.value })} /></div>;
   return <main className="min-h-screen bg-slate-50 p-4 sm:p-8"><div className="mx-auto max-w-5xl space-y-6">
