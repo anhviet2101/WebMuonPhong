@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { addDays, format, isSameDay, startOfWeek } from "date-fns";
 import { vi } from "date-fns/locale";
 import {
@@ -8,6 +8,7 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  LayoutDashboard,
   LockKeyhole,
   Plus,
   Users,
@@ -47,6 +48,8 @@ import {
   type Room,
   toLocalInput,
 } from "@/components/shared/prototype-store";
+import { isClubRole, useAuth } from "@/components/auth/auth-context";
+import { api, endpoints } from "@/lib/api";
 
 const START = 7 * 60;
 const END = 21 * 60;
@@ -56,8 +59,7 @@ const slots = Array.from(
   { length: (END - START) / SLOT_MINUTES },
   (_, i) => i,
 );
-const active = ["pending_hold", "needs_revision", "approved", "room_changed"];
-const key = (d: Date) => format(d, "yyyy-MM-dd");
+const active = ["pending_hold", "approved", "room_changed"];
 const clock = (iso: string) => format(new Date(iso), "HH:mm");
 const iso = (value: string) => new Date(value).toISOString();
 const localMinutes = (value: string) => {
@@ -69,30 +71,39 @@ function Event({
   booking,
   admin,
   open,
+  date,
 }: {
   booking: Booking;
   admin: boolean;
   open: () => void;
+  date: Date;
 }) {
   const s = new Date(booking.startAt),
     e = new Date(booking.endAt);
-  const offset = s.getHours() * 60 + s.getMinutes() - START;
-  const duration = (e.getTime() - s.getTime()) / 60000;
+  const dayStart = new Date(date);
+  dayStart.setHours(0, 0, 0, 0);
+  const startMinute = (s.getTime() - dayStart.getTime()) / 60000;
+  const endMinute = (e.getTime() - dayStart.getTime()) / 60000;
+  const offset = Math.max(0, startMinute - START);
+  const duration = Math.max(0, Math.min(END, endMinute) - Math.max(START, startMinute));
   const ok = ["approved", "room_changed"].includes(booking.status);
+  const hidden = !admin && booking.hiddenDetails;
   return (
     <>
       <div
         className="pointer-events-none absolute top-5 h-10 rounded bg-slate-300/60"
         style={{
           left: `${(Math.max(0, offset - 15) / TOTAL) * 100}%`,
-          width: `${((duration + 30) / TOTAL) * 100}%`,
+          width: `${((Math.min(TOTAL, offset + duration + 15) - Math.max(0, offset - 15)) / TOTAL) * 100}%`,
         }}
       />
       <button
         onClick={open}
         className={cn(
           "absolute top-3 z-10 h-14 overflow-hidden text-ellipsis whitespace-nowrap rounded-md border px-2 text-left text-xs shadow-sm",
-          ok
+          hidden
+            ? "border-slate-400 bg-slate-300 text-slate-800"
+            : ok
             ? "border-emerald-300 bg-emerald-100 text-emerald-900"
             : "border-amber-300 bg-amber-100 text-amber-900",
         )}
@@ -102,13 +113,15 @@ function Event({
         }}
       >
         <b className="block truncate">
-          {admin
-            ? `${booking.clubName} - ${booking.activityName}`
-            : booking.activityName}
+          {hidden
+            ? "Không khả dụng"
+            : admin
+              ? `${booking.clubName} - ${booking.activityName}`
+              : booking.activityName}
         </b>
         <span className="block truncate opacity-75">
           {clock(booking.startAt)}-{clock(booking.endAt)} ·{" "}
-          {ok ? "Approved" : "Pending Hold"}
+          {hidden ? "Bận" : ok ? "Đã duyệt" : "Đang giữ"}
         </span>
       </button>
     </>
@@ -122,9 +135,19 @@ function QuickBooking({
   draft: { room: Room; start: string } | null;
   close: () => void;
 }) {
-  const { addBooking, isRoomAvailable } = usePrototypeStore();
+  const { addBooking } = usePrototypeStore();
+  const { user } = useAuth();
   const [name, setName] = useState("");
   const [count, setCount] = useState("30");
+  const [contactPerson, setContactPerson] = useState(
+    user?.organization?.representative_name || user?.fullName || "",
+  );
+  const [contactPhone, setContactPhone] = useState(
+    user?.organization?.hotline || user?.phone || "",
+  );
+  const [contactEmail, setContactEmail] = useState(
+    user?.organization?.contact_email || user?.email || "",
+  );
   const [start, setStart] = useState(draft?.start ?? "");
   const [end, setEnd] = useState(
     draft
@@ -156,31 +179,41 @@ function QuickBooking({
         return toLocalInput(date.toISOString());
       })()
     : undefined;
-  const submit = () => {
+  const submit = async () => {
     if (!draft || !name.trim())
       return toast.error("Vui lòng nhập tên hoạt động");
     if (!start || !end || iso(end) <= iso(start))
       return toast.error("Khung giờ chưa hợp lệ");
+    if (!contactPerson.trim() || !contactPhone.trim() || !/^\S+@\S+\.\S+$/.test(contactEmail))
+      return toast.error("Vui lòng nhập đầy đủ tên, số điện thoại và email liên hệ hợp lệ");
     if (
       new Date(start).toDateString() !== new Date(end).toDateString() ||
       localMinutes(start) > END - SLOT_MINUTES ||
       localMinutes(end) > END
     )
       return toast.error("Thời gian mượn phải kết thúc trước hoặc lúc 21:00");
-    if (!isRoomAvailable(draft.room.id, iso(start), iso(end)))
-      return toast.error("Phòng đã bận trong khung giờ này");
-    const b = addBooking({
-      clubCode: "MEC",
-      clubName: "CLB Truyền thông & Sự kiện",
+    try {
+      const { data } = await api.get(endpoints.availableRooms, {
+        params: { start_time: iso(start), end_time: iso(end) },
+      });
+      const availableIds = (data.results ?? data).map((item: { id: number | string }) => String(item.id));
+      if (!availableIds.includes(draft.room.id))
+        return toast.error("Phòng đã có đơn giữ hoặc blackout trong khung giờ này");
+    } catch {
+      return toast.error("Không thể kiểm tra phòng khả dụng. Vui lòng thử lại.");
+    }
+    const b = await addBooking({
+      clubCode: user?.organization?.abbreviation ?? "",
+      clubName: user?.organization?.name ?? user?.organizationName ?? "",
       activityName: name,
       description: "Đăng ký nhanh từ lịch",
       roomId: draft.room.id,
       startAt: iso(start),
       endAt: iso(end),
       participants: Number(count),
-      contactPerson: "Nguyễn Minh Anh",
-      contactPhone: "0912 345 678",
-      contactEmail: "minhanh.mec@university.edu.vn",
+      contactPerson: contactPerson.trim(),
+      contactPhone: contactPhone.trim(),
+      contactEmail: contactEmail.trim(),
       equipment: [],
     });
     toast.success(`Đã tạo ${b.id} và giữ chỗ 48 giờ`);
@@ -228,6 +261,11 @@ function QuickBooking({
               onChange={(e) => setCount(e.target.value)}
             />
           </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-2"><Label>Người liên hệ</Label><Input value={contactPerson} onChange={(event) => setContactPerson(event.target.value)} /></div>
+            <div className="grid gap-2"><Label>Số điện thoại</Label><Input value={contactPhone} onChange={(event) => setContactPhone(event.target.value)} /></div>
+            <div className="grid gap-2 sm:col-span-2"><Label>Email</Label><Input type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} /></div>
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={close}>
@@ -258,10 +296,10 @@ function Blackout({
   );
   const [reason, setReason] = useState("Phục vụ kỳ thi");
   const [note, setNote] = useState("");
-  const submit = () => {
+  const submit = async () => {
     if (!room || iso(end) <= iso(start))
       return toast.error("Khung khóa chưa hợp lệ");
-    addBlackout({
+    await addBlackout({
       roomIds: [room],
       startAt: iso(start),
       endAt: iso(end),
@@ -356,18 +394,79 @@ function Blackout({
 export function RoomCalendar() {
   const { campuses, buildings, rooms, bookings, blackouts } =
     usePrototypeStore();
-  const [buildingId, setBuildingId] = useState("km-a"),
+  const { user } = useAuth();
+  const admin = Boolean(user && !isClubRole(user.role));
+  const [campusId, setCampusId] = useState(""),
+    [buildingId, setBuildingId] = useState(""),
+    [roomId, setRoomId] = useState("all"),
     [date, setDate] = useState(new Date()),
     [week, setWeek] = useState(false),
-    [admin, setAdmin] = useState(true),
-    [blackout, setBlackout] = useState(false);
+    [blackout, setBlackout] = useState(false),
+    [calendarBookings, setCalendarBookings] = useState<Booking[]>([]);
   const [draft, setDraft] = useState<{ room: Room; start: string } | null>(
       null,
     ),
     [detail, setDetail] = useState<Booking | null>(null);
-  const visible = rooms.filter((r) => r.buildingId === buildingId),
+  const filteredBuildings = buildings.filter((b) => !campusId || b.campusId === campusId);
+  const campusBuildingIds = new Set(filteredBuildings.map((item) => item.id));
+  const visible = rooms.filter((r) =>
+      (buildingId ? r.buildingId === buildingId : campusBuildingIds.has(r.buildingId)) &&
+      (roomId === "all" || r.id === roomId) && r.active !== false,
+    ),
     building = buildings.find((b) => b.id === buildingId),
-    campus = campuses.find((c) => c.id === building?.campusId);
+    campus = campuses.find((c) => c.id === (building?.campusId ?? campusId));
+  const roomLabel = (room: Room) => {
+    const parent = buildings.find((item) => item.id === room.buildingId);
+    const parentCampus = campuses.find((item) => item.id === parent?.campusId);
+    const location = parentCampus?.code === "KM"
+      ? `GĐ ${parentCampus.name}`
+      : parent?.name ?? parentCampus?.name ?? "Chưa rõ tòa";
+    return `${room.name} (${location})`;
+  };
+  const mapCalendarBooking = (b: any): Booking => ({
+    id: String(b.id),
+    clubCode: b.organization?.toString() ?? "",
+    clubName: b.organization_name ?? "",
+    activityName: b.activity_name,
+    description: b.description ?? "",
+    roomId: String(b.room),
+    backupRoomId: b.secondary_room ? String(b.secondary_room) : undefined,
+    startAt: b.start_time,
+    endAt: b.end_time,
+    participants: b.participant_count ?? 0,
+    contactPerson: b.contact_person ?? "",
+    contactPhone: b.contact_phone ?? "",
+    contactEmail: b.contact_email ?? "",
+    equipment: [],
+    status: b.status,
+    physicalStatus: b.physical_status,
+    scanName: b.scan_file_url?.split("/").pop(),
+    scanFileUrl: b.scan_file_url,
+    organizationProfile: b.organization_profile,
+    hiddenDetails: Boolean(b.hidden_details),
+    holdExpiresAt: b.hold_expires_at,
+    note: b.notes,
+    createdAt: b.created_at,
+  });
+  useEffect(() => {
+    const first = campuses.find((item) => item.active !== false) ?? campuses[0];
+    if (!campusId && first) setCampusId(first.id);
+  }, [campuses, campusId]);
+  useEffect(() => {
+    if (buildingId && filteredBuildings.some((item) => item.id === buildingId)) return;
+    setBuildingId(filteredBuildings.find((item) => item.active !== false)?.id ?? filteredBuildings[0]?.id ?? "");
+  }, [buildingId, filteredBuildings]);
+  useEffect(() => {
+    let cancelled = false;
+    api.get(endpoints.bookingCalendar)
+      .then(({ data }) => {
+        if (!cancelled) setCalendarBookings((data.results ?? data).map(mapCalendarBooking));
+      })
+      .catch(() => {
+        if (!cancelled) setCalendarBookings(bookings);
+      });
+    return () => { cancelled = true; };
+  }, [bookings]);
   const days = useMemo(
     () =>
       Array.from({ length: 7 }, (_, i) =>
@@ -376,6 +475,7 @@ export function RoomCalendar() {
     [date],
   );
   const move = (n: number) => setDate((d) => addDays(d, n * (week ? 7 : 1)));
+  const goDashboard = () => window.location.assign(admin ? "/admin-doan" : "/clb");
   const slotClick = (room: Room, i: number) => {
     const d = new Date(date);
     d.setHours(
@@ -396,33 +496,62 @@ export function RoomCalendar() {
                 Hệ thống Mượn phòng CLB
               </p>
               <h1 className="text-2xl font-semibold">
-                Lịch phòng & khóa phòng
+                {admin ? "Lịch phòng & khóa phòng" : "Lịch phòng"}
               </h1>
               <p className="text-sm text-slate-600">
-                Một nguồn lịch cho booking, buffer và blackout.
+                {admin
+                  ? "Một nguồn lịch cho booking, buffer và blackout."
+                  : "Xem phòng trống và click ô thời gian để đăng ký mượn phòng."}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <AuthControls />
-              <Button onClick={() => setBlackout(true)}>
-                <Plus />
-                Khóa phòng
+              <Button variant="outline" onClick={goDashboard}>
+                <LayoutDashboard />
+                Dashboard
               </Button>
+              <AuthControls />
+              {admin && (
+                <Button onClick={() => setBlackout(true)}>
+                  <Plus />
+                  Khóa phòng
+                </Button>
+              )}
             </div>
           </div>
           <Card className="mt-5">
-            <CardContent className="grid gap-3 p-4 lg:grid-cols-[240px_auto_auto_auto_1fr]">
-              <Select value={buildingId} onValueChange={setBuildingId}>
+            <CardContent className="grid gap-3 p-4 lg:grid-cols-[180px_180px_180px_auto_auto_auto_1fr]">
+              <Select value={campusId} onValueChange={(value) => { setCampusId(value); setBuildingId(""); setRoomId("all"); }}>
                 <SelectTrigger className="w-full">
                   <Building2 />
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {buildings.map((b) => (
+                  {campuses.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.code} · {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={buildingId} onValueChange={(value) => { setBuildingId(value); setRoomId("all"); }}>
+                <SelectTrigger className="w-full">
+                  <Building2 />
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {filteredBuildings.map((b) => (
                     <SelectItem key={b.id} value={b.id}>
-                      {campuses.find((c) => c.id === b.campusId)?.code} ·{" "}
                       {b.name}
                     </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={roomId} onValueChange={setRoomId}>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Phòng" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Tất cả phòng</SelectItem>
+                  {rooms.filter((room) => room.buildingId === buildingId && room.active !== false).map((room) => (
+                    <SelectItem key={room.id} value={room.id}>{room.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -476,11 +605,7 @@ export function RoomCalendar() {
                   />
                 </PopoverContent>
               </Popover>
-              <Button
-                className="lg:ml-auto"
-                variant={admin ? "default" : "outline"}
-                onClick={() => setAdmin((v) => !v)}
-              >
+              <Button className="lg:ml-auto" variant="outline">
                 <Users />
                 {admin ? "Admin VP Đoàn" : "Chế độ CLB"}
               </Button>
@@ -492,7 +617,8 @@ export function RoomCalendar() {
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h2 className="text-xl font-semibold">
-              {campus?.code} - {campus?.name} · {building?.name}
+              {campus?.code} - {campus?.name}
+              {building ? ` · ${building.name}` : ""}
             </h2>
             <p className="text-sm text-slate-600">
               07:00-21:00 · 30 phút/ô · Click ô trống để đăng ký.
@@ -542,17 +668,41 @@ export function RoomCalendar() {
                   </div>
                 ))}
               </div>
+              {visible.length === 0 && (
+                <div
+                  className="grid min-h-24 border-b"
+                  style={{
+                    gridTemplateColumns:
+                      "200px repeat(28, minmax(60px, 1fr))",
+                  }}
+                >
+                  <div className="sticky left-0 z-20 border-r bg-background p-4 text-sm text-slate-500">
+                    Chưa có phòng
+                  </div>
+                  <div className="col-span-28 flex items-center px-4 text-sm text-slate-500">
+                    Cơ sở/tòa nhà này chưa có phòng đang hoạt động để hiển thị.
+                  </div>
+                </div>
+              )}
               {visible.map((room) => {
-                const bs = bookings.filter(
+                const dayStart = new Date(date);
+                dayStart.setHours(0, 0, 0, 0);
+                const gridStart = new Date(dayStart);
+                gridStart.setHours(START / 60, 0, 0, 0);
+                const gridEnd = new Date(dayStart);
+                gridEnd.setHours(END / 60, 0, 0, 0);
+                const bs = calendarBookings.filter(
                   (b) =>
                     b.roomId === room.id &&
                     active.includes(b.status) &&
-                    key(new Date(b.startAt)) === key(date),
+                    new Date(b.startAt) < gridEnd && new Date(b.endAt) > gridStart,
                 );
                 const bos = blackouts.filter(
                   (b) =>
-                    b.roomIds.includes(room.id) &&
-                    key(new Date(b.startAt)) === key(date),
+                    (b.roomIds.includes(room.id) ||
+                      (b.scopeType === "building" && b.buildingId === room.buildingId) ||
+                      (b.scopeType === "floor" && b.buildingId === room.buildingId && b.floor === room.floor)) &&
+                    new Date(b.startAt) < gridEnd && new Date(b.endAt) > gridStart,
                 );
                 return (
                   <div
@@ -564,9 +714,9 @@ export function RoomCalendar() {
                     }}
                   >
                     <div className="sticky left-0 z-20 border-r bg-background p-4">
-                      <b>{room.name}</b>
+                      <b>{roomLabel(room)}</b>
                       <p className="text-xs text-slate-500">
-                        • {room.capacity} người
+                        • {room.capacity === null ? "Chưa cập nhật sức chứa" : `${room.capacity} người`}
                       </p>
                     </div>
                     <div
@@ -589,14 +739,17 @@ export function RoomCalendar() {
                           key={b.id}
                           booking={b}
                           admin={admin}
+                          date={date}
                           open={() => setDetail(b)}
                         />
                       ))}
                       {bos.map((b) => {
                         const s = new Date(b.startAt),
                           e = new Date(b.endAt),
-                          o = s.getHours() * 60 + s.getMinutes() - START,
-                          d = (e.getTime() - s.getTime()) / 60000;
+                          startMinute = (s.getTime() - dayStart.getTime()) / 60000,
+                          endMinute = (e.getTime() - dayStart.getTime()) / 60000,
+                          o = Math.max(0, startMinute - START),
+                          d = Math.max(0, Math.min(END, endMinute) - Math.max(START, startMinute));
                         return (
                           <button
                             key={b.id}
@@ -636,7 +789,7 @@ export function RoomCalendar() {
           close={() => setDraft(null)}
         />
       )}
-      {blackout && (
+      {admin && blackout && (
         <Blackout
           key={buildingId}
           open={blackout}
@@ -647,27 +800,29 @@ export function RoomCalendar() {
       <Dialog open={!!detail} onOpenChange={(v) => !v && setDetail(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{detail?.activityName}</DialogTitle>
+            <DialogTitle>{detail?.hiddenDetails && !admin ? "Không khả dụng" : detail?.activityName}</DialogTitle>
             <DialogDescription>
-              {detail?.id} · {detail?.clubName}
+              {detail?.hiddenDetails && !admin ? "Thông tin chi tiết được ẩn với tài khoản CLB." : `${detail?.id} · ${detail?.clubName}`}
             </DialogDescription>
           </DialogHeader>
           {detail && (
             <div className="grid gap-2 rounded-lg border bg-slate-50 p-4 text-sm">
               <p>
-                <b>Phòng:</b> {rooms.find((r) => r.id === detail.roomId)?.name}
+                <b>Phòng:</b> {roomLabel(rooms.find((r) => r.id === detail.roomId) ?? ({ id: detail.roomId, buildingId: "", name: detail.roomId, capacity: 0, equipment: [], rentable: false, bufferMinutes: 15 } as Room))}
               </p>
               <p>
                 <b>Thời gian:</b>{" "}
                 {format(new Date(detail.startAt), "dd/MM/yyyy HH:mm")} -{" "}
                 {clock(detail.endAt)}
               </p>
-              <p>
+              {!detail.hiddenDetails && <p>
                 <b>Trạng thái:</b> {detail.status}
-              </p>
-              <p>
-                <b>Quy mô:</b> {detail.participants} người
-              </p>
+              </p>}
+              {!detail.hiddenDetails && (
+                <p>
+                  <b>Quy mô:</b> {detail.participants} người
+                </p>
+              )}
             </div>
           )}
           <DialogFooter>

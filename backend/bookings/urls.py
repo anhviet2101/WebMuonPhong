@@ -5,6 +5,11 @@ from backend.bookings.views import (
     BookingViewSet,
     BuildingViewSet,
     CampusViewSet,
+    AuditLogViewSet,
+    BusinessRuleConfigViewSet,
+    DocumentTemplateViewSet,
+    NotificationViewSet,
+    OrganizationViewSet,
     RoomBlackoutViewSet,
     RoomViewSet,
     AccountTokenObtainPairView,
@@ -18,11 +23,16 @@ from backend.bookings.views import (
 
 
 router = DefaultRouter()
+router.register("organizations", OrganizationViewSet, basename="organization")
 router.register("campuses", CampusViewSet, basename="campus")
 router.register("buildings", BuildingViewSet, basename="building")
 router.register("rooms", RoomViewSet, basename="room")
 router.register("bookings", BookingViewSet, basename="booking")
 router.register("blackouts", RoomBlackoutViewSet, basename="blackout")
+router.register("rule-configs", BusinessRuleConfigViewSet, basename="rule-config")
+router.register("document-templates", DocumentTemplateViewSet, basename="document-template")
+router.register("notifications", NotificationViewSet, basename="notification")
+router.register("audit-logs", AuditLogViewSet, basename="audit-log")
 
 urlpatterns = [
     path("auth/login", AccountTokenObtainPairView.as_view(), name="token_obtain_pair"),

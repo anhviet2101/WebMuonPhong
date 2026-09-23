@@ -63,7 +63,9 @@ def booking_context():
     )
     UserProfile.objects.create(user=admin_user, role=admin_role)
 
-    campus = Campus.objects.create(name="Kiều Mai", code="KM")
+    campus, _ = Campus.objects.get_or_create(
+        code="KM", defaults={"name": "Kiều Mai"}
+    )
     building = Building.objects.create(
         campus=campus,
         name="Nhà A",

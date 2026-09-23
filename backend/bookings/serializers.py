@@ -9,6 +9,8 @@ from backend.bookings.models import (
     Building,
     BusinessRuleConfig,
     Campus,
+    DocumentTemplate,
+    Notification,
     Organization,
     Permission,
     Role,
@@ -219,7 +221,11 @@ class RoomSerializer(serializers.ModelSerializer):
 
 
 class BookingSerializer(serializers.ModelSerializer):
+    organization = serializers.PrimaryKeyRelatedField(
+        queryset=Organization.objects.filter(active=True), required=False
+    )
     organization_name = serializers.CharField(source="organization.name", read_only=True)
+    organization_profile = OrganizationSerializer(source="organization", read_only=True)
     room_name = serializers.CharField(source="room.name", read_only=True)
     campus_id = serializers.IntegerField(source="room.building.campus_id", read_only=True)
     building_id = serializers.IntegerField(source="room.building_id", read_only=True)
@@ -231,6 +237,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "id",
             "organization",
             "organization_name",
+            "organization_profile",
             "room",
             "room_name",
             "secondary_room",
@@ -262,6 +269,7 @@ class BookingSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "organization_name",
+            "organization_profile",
             "room_name",
             "status",
             "physical_status",
@@ -287,7 +295,16 @@ class BookingSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     "Tài khoản CLB chưa được gắn organization."
                 )
-            attrs["organization_id"] = organization_id
+            organization = Organization.objects.filter(
+                pk=organization_id, active=True
+            ).first()
+            if organization is None:
+                raise serializers.ValidationError("CLB không còn hoạt động.")
+            attrs["organization"] = organization
+        elif self.instance is None and "organization" not in attrs:
+            raise serializers.ValidationError(
+                {"organization": "Cần chọn CLB khi tạo đơn."}
+            )
 
         start_time = attrs.get("start_time", getattr(self.instance, "start_time", None))
         end_time = attrs.get("end_time", getattr(self.instance, "end_time", None))
@@ -365,6 +382,35 @@ class BusinessRuleConfigSerializer(serializers.ModelSerializer):
         model = BusinessRuleConfig
         fields = ["key", "value", "description", "updated_by", "updated_at"]
         read_only_fields = ["updated_by", "updated_at"]
+
+
+class DocumentTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentTemplate
+        fields = [
+            "id",
+            "template_type",
+            "name",
+            "content",
+            "active",
+            "updated_by",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "updated_by", "updated_at"]
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = [
+            "id",
+            "type",
+            "message",
+            "related_booking",
+            "is_read",
+            "created_at",
+        ]
+        read_only_fields = ["id", "type", "message", "related_booking", "created_at"]
 
 
 class AuditLogSerializer(serializers.ModelSerializer):

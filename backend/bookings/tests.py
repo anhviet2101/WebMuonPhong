@@ -1,7 +1,9 @@
 from datetime import timedelta
-
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
@@ -14,13 +16,17 @@ from backend.bookings.models import (
     Organization,
     Notification,
     Permission,
+    PhysicalStatus,
     Role,
     RolePermission,
     Room,
+    RoomBlackout,
     UserProfile,
 )
 from backend.bookings.services.booking_service import (
     approve_booking,
+    change_room,
+    confirm_physical,
     submit_booking,
 )
 from backend.bookings.tasks import (
@@ -103,6 +109,61 @@ class BookingApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item["id"] for item in response.data], [own_booking.id])
 
+    def test_club_can_create_booking_without_supplying_organization(self):
+        permission = Permission.objects.create(key="booking.create")
+        RolePermission.objects.create(role=self.role, permission=permission)
+        self.client.force_authenticate(self.user)
+        start = timezone.now() + timedelta(days=2)
+
+        response = self.client.post(
+            reverse("booking-list"),
+            {
+                "room": self.room.id,
+                "activity_name": "Club meeting",
+                "description": "Meeting",
+                "participant_count": 10,
+                "contact_person": "Representative",
+                "contact_phone": "0900000000",
+                "contact_email": "club@example.com",
+                "start_time": start.isoformat(),
+                "end_time": (start + timedelta(hours=1)).isoformat(),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Booking.objects.get(pk=response.data["id"]).organization, self.organization)
+
+    def test_admin_account_requires_and_keeps_selected_club(self):
+        admin_role = Role.objects.create(name="YU_ADMIN")
+        manage = Permission.objects.create(key="organization.manage")
+        RolePermission.objects.create(role=admin_role, permission=manage)
+        admin = User.objects.create_user("office", password="OfficePass123!")
+        UserProfile.objects.create(user=admin, role=admin_role)
+        self.client.force_authenticate(admin)
+
+        missing = self.client.post(
+            reverse("admin-users"),
+            {"username": "new-club", "role": "CLB_REP"},
+            format="json",
+        )
+        self.assertEqual(missing.status_code, 400)
+
+        created = self.client.post(
+            reverse("admin-users"),
+            {
+                "username": "new-club",
+                "role": "CLB_REP",
+                "organization": self.other_organization.id,
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(
+            UserProfile.objects.get(user_id=created.data["id"]).organization,
+            self.other_organization,
+        )
+
     def test_approve_requires_confirmed_physical_copy(self):
         booking = self._booking()
         submit_booking(booking, self.user)
@@ -130,6 +191,225 @@ class BookingApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(self.room.id, [item["id"] for item in response.data])
+
+    def test_available_rooms_allows_excluding_current_booking(self):
+        booking = self._booking()
+        submit_booking(booking, self.user)
+
+        self.client.force_authenticate(self.user)
+        response = self.client.get(
+            reverse("room-available"),
+            {
+                "start_time": booking.start_time.isoformat(),
+                "end_time": booking.end_time.isoformat(),
+                "exclude_booking": booking.id,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.room.id, [item["id"] for item in response.data])
+
+    def test_available_rooms_respects_blackout_and_buffer(self):
+        start = timezone.now() + timedelta(days=2)
+        RoomBlackout.objects.create(
+            scope_type="room",
+            room_ids=[self.room.id],
+            start_time=start + timedelta(hours=1, minutes=10),
+            end_time=start + timedelta(hours=2),
+            reason="Maintenance",
+            created_by=self.user,
+        )
+        self.client.force_authenticate(self.user)
+        response = self.client.get(reverse("room-available"), {
+            "start_time": start.isoformat(),
+            "end_time": (start + timedelta(hours=1)).isoformat(),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.room.id, [item["id"] for item in response.data])
+
+    def test_available_rooms_excludes_room_changed_booking(self):
+        booking = self._booking()
+        booking.status = BookingStatus.ROOM_CHANGED
+        booking.save(update_fields=["status"])
+        self.client.force_authenticate(self.other_user)
+        response = self.client.get(reverse("room-available"), {
+            "start_time": booking.start_time.isoformat(),
+            "end_time": booking.end_time.isoformat(),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.room.id, [item["id"] for item in response.data])
+
+    def test_available_rooms_excludes_building_blackout(self):
+        start = timezone.now() + timedelta(days=2)
+        RoomBlackout.objects.create(
+            scope_type="building",
+            room_ids=[],
+            building=self.room.building,
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+            reason="Exam",
+            created_by=self.user,
+        )
+        self.client.force_authenticate(self.user)
+        response = self.client.get(reverse("room-available"), {
+            "start_time": start.isoformat(),
+            "end_time": (start + timedelta(hours=1)).isoformat(),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.room.id, [item["id"] for item in response.data])
+
+    def test_edit_cannot_move_active_booking_into_blackout(self):
+        booking = self._booking()
+        submit_booking(booking, self.user)
+        new_start = booking.start_time + timedelta(hours=4)
+        RoomBlackout.objects.create(
+            scope_type="room",
+            room_ids=[self.room.id],
+            start_time=new_start,
+            end_time=new_start + timedelta(hours=1),
+            reason="Maintenance",
+            created_by=self.user,
+        )
+        self.client.force_authenticate(self.user)
+        response = self.client.patch(
+            reverse("booking-detail", args=[booking.id]),
+            {
+                "start_time": new_start.isoformat(),
+                "end_time": (new_start + timedelta(hours=1)).isoformat(),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400, response.data)
+        booking.refresh_from_db()
+        self.assertNotEqual(booking.start_time, new_start)
+
+    def test_calendar_redacts_other_club_details(self):
+        booking = self._booking(
+            user=self.other_user,
+            organization=self.other_organization,
+        )
+        submit_booking(booking, self.other_user)
+        self.client.force_authenticate(self.user)
+        response = self.client.get(reverse("booking-calendar"))
+        self.assertEqual(response.status_code, 200)
+        item = next(item for item in response.data if item.get("hidden_details"))
+        self.assertTrue(item["hidden_details"])
+        self.assertNotEqual(item["id"], booking.id)
+        self.assertEqual(item["activity_name"], "Không khả dụng")
+        self.assertEqual(item["organization_name"], "")
+
+    def test_same_club_representative_can_cancel_booking(self):
+        booking = self._booking()
+        submit_booking(booking, self.user)
+        colleague = User.objects.create_user("club-a-colleague", password="password")
+        UserProfile.objects.create(
+            user=colleague,
+            role=self.role,
+            organization=self.organization,
+        )
+        self.client.force_authenticate(colleague)
+        response = self.client.post(reverse("booking-cancel", args=[booking.id]))
+        self.assertEqual(response.status_code, 200, response.data)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, BookingStatus.CANCELLED)
+
+    def test_admin_can_change_pending_room_without_approving(self):
+        booking = self._booking()
+        submit_booking(booking, self.user)
+        booking.refresh_from_db()
+        other_room = Room.objects.create(
+            building=self.room.building,
+            name="102",
+            floor=1,
+            capacity=50,
+            type="classroom",
+        )
+        admin = User.objects.create_user("office", password="password", is_staff=True)
+        changed = change_room(booking, other_room, admin, reason="Room adjustment")
+        self.assertEqual(changed.status, BookingStatus.PENDING_HOLD)
+        self.assertEqual(changed.room_id, other_room.id)
+        self.assertEqual(changed.hold_expires_at, booking.hold_expires_at)
+
+    def test_scan_file_requires_booking_access(self):
+        booking = self._booking()
+        with override_settings(STORAGES={
+            "default": {"BACKEND": "django.core.files.storage.InMemoryStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }):
+            storage_path = default_storage.save(
+                f"booking-scans/{booking.id}/application.pdf",
+                ContentFile(b"%PDF-1.4\n%%EOF"),
+            )
+            booking.scan_file_url = default_storage.url(storage_path)
+            booking.save(update_fields=["scan_file_url"])
+
+            self.client.force_authenticate(self.user)
+            allowed = self.client.get(reverse("booking-scan", args=[booking.id]))
+            self.assertEqual(allowed.status_code, 200)
+            self.assertEqual(b"".join(allowed.streaming_content), b"%PDF-1.4\n%%EOF")
+
+            self.client.force_authenticate(self.other_user)
+            denied = self.client.get(reverse("booking-scan", args=[booking.id]))
+            self.assertEqual(denied.status_code, 404)
+
+    def test_approval_rejects_new_blackout(self):
+        booking = self._booking()
+        submit_booking(booking, self.user)
+        admin = User.objects.create_user("office", password="password", is_staff=True)
+        confirm_physical(booking, admin)
+        RoomBlackout.objects.create(
+            scope_type="room",
+            room_ids=[self.room.id],
+            start_time=booking.start_time,
+            end_time=booking.end_time,
+            reason="Maintenance",
+            created_by=admin,
+        )
+        with self.assertRaises(ValidationError):
+            approve_booking(booking, admin)
+
+    def test_submit_rejects_overlapping_room_booking(self):
+        first = self._booking()
+        submit_booking(first, self.user)
+        second = self._booking(start_offset=1)
+        second.start_time = first.start_time + timedelta(minutes=30)
+        second.end_time = first.end_time + timedelta(minutes=30)
+        second.save(update_fields=["start_time", "end_time", "updated_at"])
+
+        with self.assertRaises(ValidationError):
+            submit_booking(second, self.user)
+
+    def test_club_cannot_edit_after_physical_copy_confirmed(self):
+        booking = self._booking()
+        booking.status = BookingStatus.NEEDS_REVISION
+        booking.physical_status = PhysicalStatus.CONFIRMED_RECEIVED
+        booking.save(update_fields=["status", "physical_status", "updated_at"])
+
+        self.client.force_authenticate(self.user)
+        response = self.client.patch(
+            reverse("booking-detail", args=[booking.id]),
+            {"activity_name": "Updated after hard copy"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        booking.refresh_from_db()
+        self.assertEqual(booking.activity_name, "Weekly meeting")
+
+    def test_club_can_edit_pending_hold_before_physical_copy(self):
+        booking = self._booking()
+        submit_booking(booking, self.user)
+
+        self.client.force_authenticate(self.user)
+        response = self.client.patch(
+            reverse("booking-detail", args=[booking.id]),
+            {"activity_name": "Updated before hard copy"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        booking.refresh_from_db()
+        self.assertEqual(booking.activity_name, "Updated before hard copy")
 
 
 class BookingConflictServiceTests(APITestCase):

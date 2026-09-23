@@ -18,18 +18,23 @@ export function LoginPage() {
     try { const next = await login(username, password); toast.success("Đăng nhập thành công"); window.location.assign(isClubRole(next.role) ? "/clb" : "/admin-doan"); }
     catch (error) {
       if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        const nonFieldErrors = error.response?.data?.non_field_errors;
-        const message = Array.isArray(detail)
-          ? detail.join(", ")
-          : Array.isArray(nonFieldErrors)
-            ? nonFieldErrors.join(", ")
-            : detail;
+        const payload = error.response?.data;
+        const detail = typeof payload === "string"
+          ? payload.trim()
+          : Array.isArray((payload as { detail?: unknown[] } | undefined)?.detail)
+            ? (payload as { detail: string[] }).detail.filter((item) => typeof item === "string" && item.trim()).join(", ")
+            : typeof (payload as { detail?: unknown } | undefined)?.detail === "string"
+              ? (payload as { detail: string }).detail.trim()
+              : Array.isArray((payload as { non_field_errors?: unknown[] } | undefined)?.non_field_errors)
+                ? (payload as { non_field_errors: string[] }).non_field_errors.filter((item) => typeof item === "string" && item.trim()).join(", ")
+                : typeof (payload as { message?: unknown } | undefined)?.message === "string"
+                  ? (payload as { message: string }).message.trim()
+                  : "";
         toast.error(
-          message ||
+          detail ||
             (error.response
               ? `Không thể đăng nhập (HTTP ${error.response.status}).`
-              : "Không kết nối được backend tại http://127.0.0.1:8000. Hãy khởi động Django."),
+              : "Không kết nối được backend. Hãy kiểm tra cấu hình API_URL/VITE_API_URL và trạng thái server."),
         );
       } else {
         toast.error("Không thể đăng nhập. Hãy kiểm tra backend đang chạy.");

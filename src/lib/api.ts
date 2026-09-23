@@ -4,7 +4,9 @@ import axios, {
   type InternalAxiosRequestConfig,
 } from "axios";
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000/api";
+const API_URL =
+  import.meta.env.VITE_API_URL ??
+  (import.meta.env.DEV ? "http://127.0.0.1:8000/api" : "/api");
 export const accessTokenKey = "room-booking:access-token";
 export const refreshTokenKey = "room-booking:refresh-token";
 
@@ -22,6 +24,7 @@ export type AuthUser = {
 };
 export type OrganizationProfile = {
   id?: string;
+  active?: boolean;
   name: string;
   abbreviation?: string;
   address: string;
@@ -116,12 +119,18 @@ export const endpoints = {
   organizationProfile: "/organization/profile",
   changePassword: "/auth/change-password",
   users: "/users",
+  organizations: "/organizations/",
   campuses: "/campuses/",
   buildings: "/buildings/",
   rooms: "/rooms/",
   availableRooms: "/rooms/available/",
   bookings: "/bookings/",
+  bookingCalendar: "/bookings/calendar/",
   blackouts: "/blackouts/",
+  ruleConfigs: "/rule-configs/",
+  documentTemplates: "/document-templates/",
+  notifications: "/notifications/",
+  auditLogs: "/audit-logs/",
 };
 
 export const authApi = {
@@ -129,12 +138,12 @@ export const authApi = {
     api.post<LoginResponse>(endpoints.authLogin, { username, password }),
   me: () => api.get<UserProfile>(`${endpoints.me}/`),
   updateProfile: (data: Partial<UserProfile>) => api.patch<UserProfile>(`${endpoints.profile}/`, data),
-  updateOrganization: (data: OrganizationProfile) =>
+  updateOrganization: (data: Partial<OrganizationProfile>) =>
     api.patch<OrganizationProfile>(`${endpoints.organizationProfile}/`, data),
   changePassword: (currentPassword: string, newPassword: string) =>
-    api.post(`${endpoints.changePassword}/`, { current_password: currentPassword, new_password: newPassword }),
+    api.post(`${endpoints.changePassword}/`, { old_password: currentPassword, new_password: newPassword }),
   listUsers: () => api.get<{ results?: UserRecord[] } | UserRecord[]>(endpoints.users),
-  createUser: (data: Record<string, unknown>) => api.post<UserRecord>(endpoints.users, data),
+  createUser: (data: Record<string, unknown>) => api.post<UserRecord & { password?: string }>(endpoints.users, data),
   toggleUser: (id: string, isActive: boolean) => api.patch<UserRecord>(`${endpoints.users}/${id}`, { is_active: isActive }),
   resetUserPassword: (id: string) => api.post<{ password?: string }>(`${endpoints.users}/${id}/reset-password`),
 };

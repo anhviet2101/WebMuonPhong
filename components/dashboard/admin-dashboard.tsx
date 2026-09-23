@@ -1,11 +1,13 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Building2,
   CalendarDays,
   CheckCircle2,
   Clock3,
   Download,
+  Eye,
+  ExternalLink,
   FileCheck2,
   FileWarning,
   MoreHorizontal,
@@ -15,6 +17,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { toast } from "sonner";
+import { api, endpoints } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -64,6 +67,10 @@ import {
   usePrototypeStore,
   type Booking,
   type BookingStatus,
+  type Building,
+  type Campus,
+  defaultDocumentTemplateContent,
+  type DocumentTemplateContent,
   type PhysicalStatus,
   type Room,
 } from "@/components/shared/prototype-store";
@@ -81,36 +88,81 @@ function ActionDialog({
   action,
   close,
 }: {
-  action: { type: "revision" | "reject" | "room"; booking: Booking } | null;
+  action: { type: "revision" | "reject" | "room" | "cancel"; booking: Booking } | null;
   close: () => void;
 }) {
   const store = usePrototypeStore();
   const [reason, setReason] = useState("");
   const [room, setRoom] = useState("");
-  const alternatives = action
+  const [availableRoomIds, setAvailableRoomIds] = useState<string[] | null>(null);
+  const [loadingRooms, setLoadingRooms] = useState(false);
+  useEffect(() => {
+    if (action?.type !== "room") return;
+    let cancelled = false;
+    setRoom("");
+    setAvailableRoomIds(null);
+    setLoadingRooms(true);
+    api.get(endpoints.availableRooms, {
+      params: {
+        start_time: action.booking.startAt,
+        end_time: action.booking.endAt,
+        exclude_booking: action.booking.id,
+      },
+    }).then(({ data }) => {
+      if (!cancelled) setAvailableRoomIds(
+        (data.results ?? data).map((item: { id: number | string }) => String(item.id)),
+      );
+    }).catch(() => {
+      if (!cancelled) {
+        setAvailableRoomIds([]);
+        toast.error("Không thể tải danh sách phòng khả dụng");
+      }
+    }).finally(() => {
+      if (!cancelled) setLoadingRooms(false);
+    });
+    return () => { cancelled = true; };
+  }, [action?.type, action?.booking.id, action?.booking.startAt, action?.booking.endAt]);
+  const alternatives = action?.type === "room" && availableRoomIds
     ? store.rooms.filter(
         (r) =>
           r.id !== action.booking.roomId &&
-          store.isRoomAvailable(
-            r.id,
-            action.booking.startAt,
-            action.booking.endAt,
-          ),
+          availableRoomIds.includes(r.id),
       )
     : [];
-  const submit = () => {
+  const submit = async () => {
     if (!action) return;
     if (action.type === "room") {
       if (!room) return toast.error("Chọn phòng thay thế");
-      store.updateBooking(action.booking.id, {
+      try {
+        const { data } = await api.get(endpoints.availableRooms, {
+          params: {
+            start_time: action.booking.startAt,
+            end_time: action.booking.endAt,
+            exclude_booking: action.booking.id,
+          },
+        });
+        const freshIds = (data.results ?? data).map((item: { id: number | string }) => String(item.id));
+        setAvailableRoomIds(freshIds);
+        if (!freshIds.includes(room)) {
+          setRoom("");
+          return toast.error("Phòng vừa được giữ chỗ. Vui lòng chọn phòng khác.");
+        }
+      } catch {
+        return toast.error("Không thể kiểm tra phòng khả dụng. Vui lòng thử lại.");
+      }
+      await store.updateBooking(action.booking.id, {
         roomId: room,
         status: "room_changed",
         note: reason || "VP Đoàn điều chỉnh phòng",
       });
       toast.success("Đã đổi phòng và cập nhật Calendar");
+    } else if (action.type === "cancel") {
+      if (!reason.trim()) return toast.error("Vui lòng nhập lý do hủy");
+      await store.cancelBooking(action.booking.id, reason);
+      toast.success("Đã hủy đơn và giải phóng phòng");
     } else {
       if (!reason.trim()) return toast.error("Vui lòng nhập lý do");
-      store.updateBooking(action.booking.id, {
+      await store.updateBooking(action.booking.id, {
         status: action.type === "revision" ? "needs_revision" : "rejected",
         note: reason,
       });
@@ -129,7 +181,9 @@ function ActionDialog({
               ? "Yêu cầu CLB sửa"
               : action?.type === "reject"
                 ? "Từ chối đơn"
-                : "Đổi phòng"}
+                : action?.type === "cancel"
+                  ? "Hủy đơn"
+                  : "Đổi phòng"}
           </DialogTitle>
           <DialogDescription>
             {action?.booking.id} · {action?.booking.activityName}
@@ -138,6 +192,9 @@ function ActionDialog({
         {action?.type === "room" && (
           <div className="grid gap-2">
             <Label>Phòng còn trống</Label>
+            <p className="text-xs text-slate-500">
+              {loadingRooms ? "Đang kiểm tra phòng..." : alternatives.length === 0 ? "Không có phòng khả dụng trong khung giờ này." : `${alternatives.length} phòng khả dụng`}
+            </p>
             <Select value={room} onValueChange={setRoom}>
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Chọn phòng" />
@@ -145,7 +202,7 @@ function ActionDialog({
               <SelectContent>
                 {alternatives.map((r) => (
                   <SelectItem key={r.id} value={r.id}>
-                    {r.name} · {r.capacity} người
+                    {r.name} · {r.capacity === null ? "Chưa cập nhật sức chứa" : `${r.capacity} người`}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -162,7 +219,9 @@ function ActionDialog({
           </Button>
           <Button
             variant={action?.type === "reject" ? "destructive" : "default"}
+            className={action?.type === "cancel" ? "bg-red-600 hover:bg-red-700" : undefined}
             onClick={submit}
+            disabled={action?.type === "room" && (loadingRooms || !room || !availableRoomIds?.includes(room))}
           >
             Xác nhận
           </Button>
@@ -171,15 +230,18 @@ function ActionDialog({
     </Dialog>
   );
 }
-function ExportDialog({ open, close }: { open: boolean; close: () => void }) {
+function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: () => void; openClubProfile: (booking: Booking) => void }) {
   const store = usePrototypeStore();
+  const template = store.documentTemplates.find((item) => item.templateType === "mau_b")?.content;
   const today = new Date();
   const monday = new Date(today);
   monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
   const sunday = new Date(monday);
   sunday.setDate(monday.getDate() + 6);
-  const [from, setFrom] = useState(monday.toISOString().slice(0, 10));
-  const [to, setTo] = useState(sunday.toISOString().slice(0, 10));
+  const localDateValue = (date: Date) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const [from, setFrom] = useState(localDateValue(monday));
+  const [to, setTo] = useState(localDateValue(sunday));
   const rows = useMemo<ScheduleRow[]>(() => {
     const start = new Date(`${from}T00:00:00`);
     const end = new Date(`${to}T23:59:59`);
@@ -269,7 +331,7 @@ function ExportDialog({ open, close }: { open: boolean; close: () => void }) {
                       {row.room?.name} - {row.building?.name}
                     </TableCell>
                     <TableCell>
-                      <b>{row.booking.clubName}</b>
+                      <button className="font-semibold text-blue-700 hover:underline" onClick={() => openClubProfile(row.booking)}>{row.booking.clubName}</button>
                       <p className="text-xs text-slate-500">
                         {row.booking.activityName}
                       </p>
@@ -288,7 +350,7 @@ function ExportDialog({ open, close }: { open: boolean; close: () => void }) {
           <Button
             variant="outline"
             disabled={!rows.length}
-            onClick={() => printSchedule(rows)}
+            onClick={() => printSchedule(rows, template)}
           >
             <Printer />
             In đơn
@@ -296,7 +358,7 @@ function ExportDialog({ open, close }: { open: boolean; close: () => void }) {
           <Button
             disabled={!rows.length}
             onClick={async () => {
-              await exportScheduleDocx(rows, `Mau-B-${from}-${to}.docx`);
+              await exportScheduleDocx(rows, `Mau-B-${from}-${to}.docx`, template);
               toast.success("Đã tải Mẫu B tổng hợp");
             }}
           >
@@ -314,10 +376,14 @@ function SupportDialog({ open, close }: { open: boolean; close: () => void }) {
   const [form, setForm] = useState(store.supportContact);
   const field = (key: keyof typeof form, value: string) =>
     setForm((current) => ({ ...current, [key]: value }));
-  const save = () => {
+  const save = async () => {
     if (Object.values(form).some((value) => !value.trim()))
       return toast.error("Vui lòng điền đầy đủ thông tin cán bộ trực");
-    store.updateSupportContact(form);
+    try {
+      await store.updateSupportContact(form);
+    } catch {
+      return;
+    }
     toast.success("Đã cập nhật đầu mối hỗ trợ hiển thị cho CLB");
     close();
   };
@@ -378,142 +444,319 @@ function SupportDialog({ open, close }: { open: boolean; close: () => void }) {
     </Dialog>
   );
 }
-function Facility() {
+
+function TemplateDialog({ open, close }: { open: boolean; close: () => void }) {
   const store = usePrototypeStore();
-  const [building, setBuilding] = useState("km-a"),
-    [edit, setEdit] = useState<Room | null>(null),
-    [add, setAdd] = useState(false),
-    [name, setName] = useState(""),
-    [capacity, setCapacity] = useState("50");
-  const save = () => {
-    if (!name.trim()) return toast.error("Nhập tên phòng");
-    if (edit) {
-      store.updateRoom(edit.id, { name, capacity: Number(capacity) });
-      toast.success("Đã cập nhật phòng");
-    } else {
-      store.addRoom({
-        buildingId: building,
-        name,
-        capacity: Number(capacity),
-        equipment: ["projector", "ac", "whiteboard"],
-        rentable: true,
-        bufferMinutes: 15,
-      });
-      toast.success("Đã thêm phòng mới");
-    }
-    setEdit(null);
-    setAdd(false);
-    setName("");
+  const [type, setType] = useState<"mau_a" | "mau_b">("mau_a");
+  const current = store.documentTemplates.find((item) => item.templateType === type);
+  const [form, setForm] = useState<DocumentTemplateContent>({
+    ...defaultDocumentTemplateContent,
+    ...(current?.content ?? {}),
+  });
+
+  const selectType = (value: "mau_a" | "mau_b") => {
+    const next = store.documentTemplates.find((item) => item.templateType === value);
+    setType(value);
+    setForm({ ...defaultDocumentTemplateContent, ...(next?.content ?? {}) });
   };
+  const field = (key: keyof DocumentTemplateContent, value: string) =>
+    setForm((state) => ({ ...state, [key]: value }));
+  const save = async () => {
+    await store.updateDocumentTemplate(type, {
+      name: type === "mau_a" ? "Mẫu A" : "Mẫu B",
+      content: form,
+      active: true,
+    });
+    toast.success("Đã cập nhật mẫu đơn");
+    close();
+  };
+  const input = (key: keyof DocumentTemplateContent, label: string, rows = 2) => (
+    <div className="grid gap-2">
+      <Label>{label}</Label>
+      <textarea
+        className="min-h-20 rounded-md border bg-white px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        rows={rows}
+        value={form[key]}
+        onChange={(event) => field(key, event.target.value)}
+      />
+    </div>
+  );
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between">
-        <Select value={building} onValueChange={setBuilding}>
-          <SelectTrigger className="w-full sm:w-72">
-            <Building2 />
+    <Dialog open={open} onOpenChange={(value) => !value && close()}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>Quản lý Mẫu A/B</DialogTitle>
+          <DialogDescription>
+            Nội dung lưu trong cơ sở dữ liệu và áp dụng cho lần xuất đơn tiếp theo.
+          </DialogDescription>
+        </DialogHeader>
+        <Select value={type} onValueChange={(value) => selectType(value as "mau_a" | "mau_b")}>
+          <SelectTrigger className="w-full sm:w-64">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {store.buildings.map((b) => (
-              <SelectItem key={b.id} value={b.id}>
-                {store.campuses.find((c) => c.id === b.campusId)?.name} ·{" "}
-                {b.name}
-              </SelectItem>
-            ))}
+            <SelectItem value="mau_a">Mẫu A</SelectItem>
+            <SelectItem value="mau_b">Mẫu B</SelectItem>
           </SelectContent>
         </Select>
-        <Button onClick={() => setAdd(true)}>
-          <Plus />
-          Thêm phòng
-        </Button>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {store.rooms
-          .filter((r) => r.buildingId === building)
-          .map((r) => (
-            <Card key={r.id}>
-              <CardContent className="p-4">
-                <div className="flex justify-between gap-2">
-                  <div>
-                    <b>{r.name}</b>
-                    <p className="text-sm text-slate-500">
-                      {r.capacity} người · Buffer {r.bufferMinutes} phút
-                    </p>
-                  </div>
-                  <button
-                    role="switch"
-                    aria-checked={r.rentable}
-                    onClick={() => {
-                      store.updateRoom(r.id, { rentable: !r.rentable });
-                      toast.success(
-                        `${r.name}: ${!r.rentable ? "đã bật cho mượn" : "đã tạm ngưng"}`,
-                      );
-                    }}
-                    className={`h-6 w-11 rounded-full p-1 ${r.rentable ? "bg-emerald-500" : "bg-slate-300"}`}
-                  >
-                    <span
-                      className={`block size-4 rounded-full bg-white transition-transform ${r.rentable ? "translate-x-5" : ""}`}
-                    />
-                  </button>
-                </div>
-                <Button
-                  className="mt-4"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setEdit(r);
-                    setName(r.name);
-                    setCapacity(String(r.capacity));
-                  }}
-                >
-                  Sửa phòng
-                </Button>
-              </CardContent>
-            </Card>
-          ))}
-      </div>
-      <Dialog
-        open={add || !!edit}
-        onOpenChange={(v) => {
-          if (!v) {
-            setAdd(false);
-            setEdit(null);
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{edit ? "Sửa phòng" : "Thêm phòng"}</DialogTitle>
-            <DialogDescription>
-              Cập nhật danh mục phòng dùng chung cho Calendar và booking.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4">
-            <div className="grid gap-2">
-              <Label>Tên phòng</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} />
-            </div>
-            <div className="grid gap-2">
-              <Label>Sức chứa</Label>
-              <Input
-                type="number"
-                value={capacity}
-                onChange={(e) => setCapacity(e.target.value)}
-              />
-            </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          {input("leftHeader", "Header trái", 3)}
+          {input("rightHeader", "Header phải", 3)}
+          {input("title", "Tiêu đề", 1)}
+          {input("recipient", "Kính gửi", 1)}
+          <div className="sm:col-span-2">{input("intro", "Đoạn mở đầu", 4)}</div>
+          <div className="sm:col-span-2">{input("commitment", "Cam kết", 3)}</div>
+          <div className="sm:col-span-2">{input("closing", "Lời kết", 2)}</div>
+          {input("leftSignature", "Chữ ký trái", 3)}
+          {input("rightSignature", "Chữ ký phải", 3)}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={close}>
+            Hủy
+          </Button>
+          <Button onClick={save}>Lưu mẫu</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ScanPreviewDialog({ booking, close }: { booking: Booking | null; close: () => void }) {
+  const url = booking?.scanFileUrl;
+  const lower = url?.toLowerCase() ?? "";
+  const [previewUrl, setPreviewUrl] = useState<string | undefined>();
+  const [previewMime, setPreviewMime] = useState("");
+  const [previewError, setPreviewError] = useState(false);
+  useEffect(() => {
+    setPreviewMime("");
+    setPreviewError(false);
+    if (!booking || !url) {
+      setPreviewUrl(undefined);
+      return;
+    }
+    if (!url.startsWith("/media/") && !url.startsWith("media/")) {
+      setPreviewUrl(url);
+      if (url.startsWith("blob:")) {
+        let active = true;
+        void fetch(url)
+          .then((response) => response.blob())
+          .then((blob) => { if (active) setPreviewMime(blob.type); })
+          .catch(() => { if (active) setPreviewError(true); });
+        return () => { active = false; };
+      }
+      return;
+    }
+    let active = true;
+    let blobUrl: string | undefined;
+    setPreviewUrl(undefined);
+    api.get(`${endpoints.bookings}${booking.id}/scan/`, { responseType: "blob" })
+      .then(({ data }) => {
+        blobUrl = URL.createObjectURL(data);
+        if (active) {
+          setPreviewMime(data.type);
+          setPreviewUrl(blobUrl);
+        }
+        else URL.revokeObjectURL(blobUrl);
+      })
+      .catch(() => { if (active) setPreviewError(true); });
+    return () => {
+      active = false;
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [booking?.id, url]);
+  const isPdf = previewMime.toLowerCase().includes("application/pdf") || /\.pdf(?:[?#]|$)/.test(lower) ||
+    booking?.scanName?.toLowerCase().endsWith(".pdf") ||
+    lower.startsWith("data:application/pdf");
+  return (
+    <Dialog open={!!booking} onOpenChange={(value) => !value && close()}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>Bản scan {booking?.id}</DialogTitle>
+          <DialogDescription>{booking?.activityName}</DialogDescription>
+        </DialogHeader>
+        {!url ? (
+          <div className="rounded-md border bg-slate-50 p-6 text-sm text-slate-600">
+            Đơn này chưa có bản scan.
           </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setAdd(false);
-                setEdit(null);
-              }}
-            >
-              Hủy
+        ) : previewError ? (
+          <div className="rounded-md border bg-slate-50 p-6 text-sm text-slate-600">Không thể tải bản scan.</div>
+        ) : !previewUrl ? (
+          <div className="rounded-md border bg-slate-50 p-6 text-sm text-slate-600">Đang tải bản scan...</div>
+        ) : isPdf ? (
+          <iframe title="Bản scan PDF" src={previewUrl} className="h-[70vh] w-full rounded-md border" />
+        ) : (
+          <img src={previewUrl} alt={`Bản scan ${booking?.id}`} className="max-h-[70vh] w-full rounded-md border object-contain" />
+        )}
+        <DialogFooter>
+          {previewUrl && (
+            <Button variant="outline" asChild>
+              <a href={previewUrl} target="_blank" rel="noreferrer">
+                <ExternalLink />
+                Mở tab mới
+              </a>
             </Button>
-            <Button onClick={save}>Lưu phòng</Button>
-          </DialogFooter>
+          )}
+          <Button onClick={close}>Đóng</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ClubProfileDialog({ booking, close }: { booking: Booking | null; close: () => void }) {
+  const profile = booking?.organizationProfile;
+  return (
+    <Dialog open={!!booking} onOpenChange={(value) => !value && close()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{profile?.name ?? booking?.clubName ?? "Hồ sơ CLB"}</DialogTitle>
+          <DialogDescription>Thông tin liên hệ dùng khi VP Đoàn cần đối soát đơn.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-3 rounded-md border bg-slate-50 p-4 text-sm">
+          <p><b>Tên CLB:</b> {profile?.name ?? booking?.clubName}</p>
+          <p><b>Fanpage:</b> {profile?.fanpage_url ? <a className="text-blue-700 underline" href={profile.fanpage_url} target="_blank" rel="noreferrer">{profile.fanpage_url}</a> : "Chưa cập nhật"}</p>
+          <p><b>Người phụ trách:</b> {profile?.representative_name ?? booking?.contactPerson ?? "Chưa cập nhật"}</p>
+          <p><b>Hotline:</b> {profile?.hotline ?? booking?.contactPhone ?? "Chưa cập nhật"}</p>
+          <p><b>Email liên hệ:</b> {profile?.contact_email ?? booking?.contactEmail ?? "Chưa cập nhật"}</p>
+        </div>
+        <DialogFooter>
+          <Button onClick={close}>Đóng</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function Facility() {
+  const store = usePrototypeStore();
+  const [campusId, setCampusId] = useState(store.campuses[0]?.id ?? "");
+  const campusBuildings = store.buildings.filter((item) => item.campusId === campusId);
+  const [buildingId, setBuildingId] = useState(campusBuildings[0]?.id ?? "");
+  const visibleRooms = store.rooms.filter((item) => item.buildingId === buildingId);
+  const [campusForm, setCampusForm] = useState<Campus | null>(null);
+  const [buildingForm, setBuildingForm] = useState<Building | null>(null);
+  const [roomForm, setRoomForm] = useState<Room | null>(null);
+  useEffect(() => {
+    if (campusId && !campusBuildings.some((item) => item.id === buildingId)) {
+      setBuildingId(campusBuildings[0]?.id ?? "");
+    }
+  }, [buildingId, campusBuildings, campusId]);
+
+  const toggle = (enabled: boolean) => enabled ? "Đang hiển thị" : "Đã ẩn";
+  const openNewCampus = () => setCampusForm({ id: "", code: "", name: "", address: "", active: true });
+  const openNewBuilding = () => setBuildingForm({ id: "", campusId, code: "", name: "", active: true });
+  const openNewRoom = () => setRoomForm({ id: "", buildingId, name: "", capacity: 50, equipment: ["projector", "ac", "whiteboard"], rentable: true, bufferMinutes: 15, active: true });
+
+  const saveCampus = async () => {
+    if (!campusForm?.name.trim() || !campusForm.code.trim()) return toast.error("Nhập tên và mã cơ sở");
+    if (campusForm.id) await store.updateCampus(campusForm.id, campusForm);
+    else await store.addCampus(campusForm);
+    toast.success("Đã lưu cơ sở");
+    setCampusForm(null);
+  };
+  const saveBuilding = async () => {
+    if (!buildingForm?.name.trim() || !buildingForm.campusId) return toast.error("Nhập tên tòa và chọn cơ sở");
+    if (buildingForm.id) await store.updateBuilding(buildingForm.id, buildingForm);
+    else await store.addBuilding(buildingForm);
+    toast.success("Đã lưu tòa nhà");
+    setBuildingForm(null);
+  };
+  const saveRoom = async () => {
+    if (!roomForm?.name.trim() || !roomForm.buildingId) return toast.error("Nhập tên phòng và chọn tòa");
+    if (roomForm.id) await store.updateRoom(roomForm.id, roomForm);
+    else await store.addRoom(roomForm);
+    toast.success("Đã lưu phòng");
+    setRoomForm(null);
+  };
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-3">
+      <Card>
+        <CardHeader><CardTitle>Cơ sở / Giảng đường</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <Button onClick={openNewCampus}><Plus />Thêm cơ sở</Button>
+          {store.campuses.map((item) => (
+            <button key={item.id} onClick={() => setCampusId(item.id)} className={`w-full rounded-md border p-3 text-left ${campusId === item.id ? "border-blue-500 bg-blue-50" : "bg-white"}`}>
+              <b>{item.code} · {item.name}</b>
+              <p className="text-xs text-slate-500">{toggle(item.active !== false)}</p>
+              <span className="mt-2 inline-block text-xs text-blue-700" onClick={(event) => { event.stopPropagation(); setCampusForm(item); }}>Sửa</span>
+            </button>
+          ))}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Tòa nhà</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <Button disabled={!campusId} onClick={openNewBuilding}><Plus />Thêm tòa nhà</Button>
+          {campusBuildings.map((item) => (
+            <button key={item.id} onClick={() => setBuildingId(item.id)} className={`w-full rounded-md border p-3 text-left ${buildingId === item.id ? "border-blue-500 bg-blue-50" : "bg-white"}`}>
+              <b>{item.name}</b>
+              <p className="text-xs text-slate-500">{toggle(item.active !== false)}</p>
+              <span className="mt-2 inline-block text-xs text-blue-700" onClick={(event) => { event.stopPropagation(); setBuildingForm(item); }}>Sửa</span>
+            </button>
+          ))}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Phòng</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <Button disabled={!buildingId} onClick={openNewRoom}><Plus />Thêm phòng</Button>
+          {visibleRooms.map((item) => (
+            <div key={item.id} className="rounded-md border bg-white p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <b>{item.name}</b>
+                  <p className="text-xs text-slate-500">{item.capacity === null ? "Chưa cập nhật sức chứa" : `${item.capacity} người`} · Buffer {item.bufferMinutes} phút · {item.rentable ? "Cho mượn" : "Tạm ngưng"}</p>
+                </div>
+                <Button size="sm" variant="outline" onClick={() => setRoomForm(item)}>Sửa</Button>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Dialog open={!!campusForm} onOpenChange={(value) => !value && setCampusForm(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{campusForm?.id ? "Sửa cơ sở" : "Thêm cơ sở"}</DialogTitle></DialogHeader>
+          <div className="grid gap-3">
+            <Label>Mã cơ sở</Label><Input value={campusForm?.code ?? ""} onChange={(e) => setCampusForm((value) => value && { ...value, code: e.target.value })} />
+            <Label>Tên cơ sở / giảng đường</Label><Input value={campusForm?.name ?? ""} onChange={(e) => setCampusForm((value) => value && { ...value, name: e.target.value })} />
+            <Label>Địa chỉ</Label><Input value={campusForm?.address ?? ""} onChange={(e) => setCampusForm((value) => value && { ...value, address: e.target.value })} />
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={campusForm?.active !== false} onChange={(e) => setCampusForm((value) => value && { ...value, active: e.target.checked })} /> Active</label>
+          </div>
+          <DialogFooter><Button variant="outline" onClick={() => setCampusForm(null)}>Hủy</Button><Button onClick={saveCampus}>Lưu</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={!!buildingForm} onOpenChange={(value) => !value && setBuildingForm(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{buildingForm?.id ? "Sửa tòa nhà" : "Thêm tòa nhà"}</DialogTitle></DialogHeader>
+          <div className="grid gap-3">
+            <Label>Cơ sở</Label>
+            <Select value={buildingForm?.campusId ?? ""} onValueChange={(value) => setBuildingForm((state) => state && { ...state, campusId: value })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>{store.campuses.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+            </Select>
+            <Label>Tên tòa nhà</Label><Input value={buildingForm?.name ?? ""} onChange={(e) => setBuildingForm((value) => value && { ...value, name: e.target.value })} />
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={buildingForm?.active !== false} onChange={(e) => setBuildingForm((value) => value && { ...value, active: e.target.checked })} /> Active</label>
+          </div>
+          <DialogFooter><Button variant="outline" onClick={() => setBuildingForm(null)}>Hủy</Button><Button onClick={saveBuilding}>Lưu</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={!!roomForm} onOpenChange={(value) => !value && setRoomForm(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{roomForm?.id ? "Sửa phòng" : "Thêm phòng"}</DialogTitle></DialogHeader>
+          <div className="grid gap-3">
+            <Label>Tòa nhà</Label>
+            <Select value={roomForm?.buildingId ?? ""} onValueChange={(value) => setRoomForm((state) => state && { ...state, buildingId: value })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>{store.buildings.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+            </Select>
+            <Label>Tên phòng</Label><Input value={roomForm?.name ?? ""} onChange={(e) => setRoomForm((value) => value && { ...value, name: e.target.value })} />
+            <Label>Sức chứa</Label><Input type="number" min="1" value={roomForm?.capacity ?? ""} onChange={(e) => setRoomForm((value) => value && { ...value, capacity: e.target.value ? Number(e.target.value) : null })} />
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={roomForm?.rentable !== false} onChange={(e) => setRoomForm((value) => value && { ...value, rentable: e.target.checked })} /> Cho CLB mượn</label>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={roomForm?.active !== false} onChange={(e) => setRoomForm((value) => value && { ...value, active: e.target.checked })} /> Active</label>
+          </div>
+          <DialogFooter><Button variant="outline" onClick={() => setRoomForm(null)}>Hủy</Button><Button onClick={saveRoom}>Lưu</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
@@ -527,11 +770,15 @@ export function AdminDashboard() {
     [campus, setCampus] = useState("all"),
     [selected, setSelected] = useState<Set<string>>(new Set()),
     [action, setAction] = useState<{
-      type: "revision" | "reject" | "room";
+      type: "revision" | "reject" | "room" | "cancel";
       booking: Booking;
     } | null>(null),
     [exporting, setExporting] = useState(false),
-    [supportOpen, setSupportOpen] = useState(false);
+    [supportOpen, setSupportOpen] = useState(false),
+    [templateOpen, setTemplateOpen] = useState(false),
+    [scanPreview, setScanPreview] = useState<Booking | null>(null),
+    [clubProfile, setClubProfile] = useState<Booking | null>(null),
+    [directReceipt, setDirectReceipt] = useState<Set<string>>(new Set());
   const filtered = useMemo(
     () =>
       store.bookings.filter((b) => {
@@ -599,10 +846,16 @@ export function AdminDashboard() {
         userInitials="VP"
         notificationAudience="admin"
         primaryAction={
-          <Button variant="outline" onClick={() => setSupportOpen(true)}>
-            <Settings2 />
-            Cán bộ trực hỗ trợ
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => setTemplateOpen(true)}>
+              <FileCheck2 />
+              Mẫu A/B
+            </Button>
+            <Button variant="outline" onClick={() => setSupportOpen(true)}>
+              <Settings2 />
+              Cán bộ trực hỗ trợ
+            </Button>
+          </div>
         }
       />
       <div className="mx-auto max-w-[1500px] space-y-6 px-4 py-6 sm:px-6">
@@ -737,9 +990,14 @@ export function AdminDashboard() {
                           "pending_hold",
                           "needs_revision",
                         ].includes(b.status),
+                        canApproveStatus = [
+                          "pending_hold",
+                          "needs_revision",
+                        ].includes(b.status),
+                        direct = directReceipt.has(b.id),
                         canApprove =
-                          canProcess &&
-                          b.physicalStatus === "confirmed_received";
+                          canApproveStatus &&
+                          (b.physicalStatus === "confirmed_received" || direct);
                       return (
                         <TableRow key={b.id}>
                           <TableCell>
@@ -759,9 +1017,12 @@ export function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <b>{b.id}</b>
-                            <p className="text-xs text-slate-500">
+                            <button
+                              className="block text-left text-xs text-blue-700 hover:underline"
+                              onClick={() => setClubProfile(b)}
+                            >
                               {b.clubName}
-                            </p>
+                            </button>
                             <p className="mt-1 text-xs text-slate-600">
                               <b>{b.contactPerson}</b> ·{" "}
                               {b.contactRole || "Đại diện CLB"}
@@ -784,6 +1045,22 @@ export function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <PhysicalStatusBadge status={b.physicalStatus} />
+                            {b.physicalStatus === "not_submitted" && canApproveStatus && (
+                              <label className="mt-2 flex items-start gap-2 text-xs text-slate-600">
+                                <input
+                                  type="checkbox"
+                                  checked={direct}
+                                  onChange={(event) =>
+                                    setDirectReceipt((current) => {
+                                      const next = new Set(current);
+                                      event.target.checked ? next.add(b.id) : next.delete(b.id);
+                                      return next;
+                                    })
+                                  }
+                                />
+                                Xác nhận nhận bản cứng trực tiếp tại VP
+                              </label>
+                            )}
                           </TableCell>
                           <TableCell>
                             <BookingStatusBadge status={b.status} />
@@ -794,8 +1071,8 @@ export function AdminDashboard() {
                               canProcess ? (
                                 <Button
                                   size="sm"
-                                  onClick={() => {
-                                    store.updateBooking(b.id, {
+                                  onClick={async () => {
+                                    await store.updateBooking(b.id, {
                                       physicalStatus: "confirmed_received",
                                     });
                                     toast.success("Đã xác nhận nhận bản cứng");
@@ -810,10 +1087,20 @@ export function AdminDashboard() {
                                       <span>
                                         <Button
                                           size="sm"
-                                          disabled={!canApprove}
-                                          onClick={() => {
-                                            store.updateBooking(b.id, {
+                                           disabled={!canApprove}
+                                           onClick={async () => {
+                                            if (direct && b.physicalStatus !== "confirmed_received") {
+                                              await store.updateBooking(b.id, {
+                                                physicalStatus: "confirmed_received",
+                                              });
+                                            }
+                                            await store.updateBooking(b.id, {
                                               status: "approved",
+                                            });
+                                            setDirectReceipt((current) => {
+                                              const next = new Set(current);
+                                              next.delete(b.id);
+                                              return next;
                                             });
                                             toast.success(
                                               "Đã duyệt đơn; Calendar chuyển màu xanh",
@@ -841,6 +1128,13 @@ export function AdminDashboard() {
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end">
                                   <DropdownMenuItem
+                                    disabled={!b.scanFileUrl}
+                                    onClick={() => setScanPreview(b)}
+                                  >
+                                    <Eye />
+                                    Xem bản scan
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
                                     disabled={!canProcess}
                                     onClick={() =>
                                       setAction({
@@ -857,6 +1151,15 @@ export function AdminDashboard() {
                                     }
                                   >
                                     Đổi phòng
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    disabled={["cancelled", "rejected", "expired", "completed"].includes(b.status)}
+                                    onClick={() =>
+                                      setAction({ type: "cancel", booking: b })
+                                    }
+                                  >
+                                    Hủy đơn
                                   </DropdownMenuItem>
                                   <DropdownMenuItem
                                     variant="destructive"
@@ -892,11 +1195,16 @@ export function AdminDashboard() {
         />
       )}
       {exporting && (
-        <ExportDialog open={exporting} close={() => setExporting(false)} />
+        <ExportDialog open={exporting} close={() => setExporting(false)} openClubProfile={(booking) => { setExporting(false); setClubProfile(booking); }} />
       )}
       {supportOpen && (
         <SupportDialog open={supportOpen} close={() => setSupportOpen(false)} />
       )}
+      {templateOpen && (
+        <TemplateDialog open={templateOpen} close={() => setTemplateOpen(false)} />
+      )}
+      <ScanPreviewDialog booking={scanPreview} close={() => setScanPreview(null)} />
+      <ClubProfileDialog booking={clubProfile} close={() => setClubProfile(null)} />
     </main>
   );
 }

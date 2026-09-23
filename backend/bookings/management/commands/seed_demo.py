@@ -26,6 +26,7 @@ class Command(BaseCommand):
         admin_role = self._role("YU_ADMIN", "Văn phòng Đoàn")
         club_role = self._role("CLB_REP", "Đại diện câu lạc bộ")
         self._grant_admin_permissions(admin_role)
+        self._grant_club_permissions(club_role)
 
         org_a = self._organization(
             "CLB Công nghệ thông tin",
@@ -72,12 +73,12 @@ class Command(BaseCommand):
         )[0]
         building = Building.objects.update_or_create(
             campus=campus,
-            name="Nhà A",
-            defaults={"floor_count": 3, "active": True},
+            name="Tòa A",
+            defaults={"floor_count": 5, "active": True},
         )[0]
-        room_a = self._room(building, "A101", 1, 40, has_projector=True)
-        room_b = self._room(building, "A102", 1, 80, has_projector=True, has_ac=True)
-        room_c = self._room(building, "A201", 2, 120, has_projector=True, has_microphone=True, has_ac=True)
+        room_a = self._room(building, "KM-101", 1, 60, has_projector=True)
+        room_b = self._room(building, "KM-102", 1, 60, has_projector=True, has_ac=True)
+        room_c = self._room(building, "KM-201", 2, 60, has_projector=True, has_microphone=True, has_ac=True)
 
         base = timezone.now().replace(minute=0, second=0, microsecond=0)
         self._booking(
@@ -133,6 +134,24 @@ class Command(BaseCommand):
             "booking.change_room",
             "booking.confirm_physical_submission",
             "blackout.manage",
+            "rule_config.manage",
+            "document_template.manage",
+            "audit_log.view",
+            "export.mau_a",
+            "export.mau_b",
+        )
+        for key in keys:
+            permission = Permission.objects.get_or_create(key=key)[0]
+            RolePermission.objects.get_or_create(role=role, permission=permission)
+
+    @staticmethod
+    def _grant_club_permissions(role):
+        keys = (
+            "booking.view_own",
+            "booking.create",
+            "booking.edit_own_before_approval",
+            "booking.cancel_own",
+            "export.mau_a",
         )
         for key in keys:
             permission = Permission.objects.get_or_create(key=key)[0]

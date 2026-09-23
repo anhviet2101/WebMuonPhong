@@ -5,6 +5,7 @@ import { LoginPage } from "../components/auth/login-page";
 import { ProfilePage } from "../components/auth/profile-page";
 import { AdminUsersPage } from "../components/auth/admin-users-page";
 import { isClubRole, useAuth } from "../components/auth/auth-context";
+import { PrototypeStoreProvider } from "../components/shared/prototype-store";
 import { useEffect, type ReactNode } from "react";
 
 function ProtectedRoute({
@@ -33,12 +34,30 @@ export default function App() {
     return <ProtectedRoute allow={(role) => !isClubRole(role)}><AdminUsersPage /></ProtectedRoute>;
   }
   if (window.location.pathname.includes("admin-doan")) {
-    return <ProtectedRoute allow={(role) => !isClubRole(role)}><AdminDashboard /></ProtectedRoute>;
+    return (
+      <ProtectedRoute allow={(role) => !isClubRole(role)}>
+        <PrototypeStoreProvider>
+          <AdminDashboard />
+        </PrototypeStoreProvider>
+      </ProtectedRoute>
+    );
   }
 
   if (window.location.pathname.includes("calendar")) {
-    return <RoomCalendar />;
+    return (
+      <ProtectedRoute allow={() => true}>
+        <PrototypeStoreProvider>
+          <RoomCalendar />
+        </PrototypeStoreProvider>
+      </ProtectedRoute>
+    );
   }
 
-  return <ClubDashboard />;
+  return (
+    <ProtectedRoute allow={isClubRole}>
+      <PrototypeStoreProvider>
+        <ClubDashboard />
+      </PrototypeStoreProvider>
+    </ProtectedRoute>
+  );
 }

@@ -1,8 +1,13 @@
-from datetime import timedelta
+import mimetypes
+from pathlib import PurePosixPath
+from urllib.parse import unquote, urlparse
 
+from django.conf import settings
+from django.core.files.storage import default_storage
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Q
+from django.http import FileResponse, Http404
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import mixins, status, viewsets
@@ -19,10 +24,15 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils.crypto import get_random_string
 
 from backend.bookings.models import (
+    AuditLog,
     Booking,
     BookingStatus,
     Building,
+    BusinessRuleConfig,
     Campus,
+    DocumentTemplate,
+    Notification,
+    PhysicalStatus,
     Room,
     RoomBlackout,
 )
@@ -30,6 +40,7 @@ from backend.bookings.permissions import (
     AdminWriteOrReadOnly,
     BookingObjectPermission,
     HasPermission,
+    IsAdminRole,
     filter_bookings_for_user,
     get_user_organization_id,
     is_admin,
@@ -48,6 +59,10 @@ from backend.bookings.serializers import (
     ChangePasswordSerializer,
     OrganizationSerializer,
     UserAdminSerializer,
+    AuditLogSerializer,
+    BusinessRuleConfigSerializer,
+    DocumentTemplateSerializer,
+    NotificationSerializer,
 )
 from backend.bookings.auth import AccountTokenObtainPairSerializer
 from backend.bookings.models import Organization, UserProfile
@@ -57,6 +72,7 @@ from backend.bookings.services import booking_service
 CONFLICT_STATUSES = [
     BookingStatus.PENDING_HOLD.value,
     BookingStatus.APPROVED.value,
+    BookingStatus.ROOM_CHANGED.value,
 ]
 
 User = get_user_model()
@@ -105,11 +121,10 @@ class OrganizationProfileView(APIView):
             raise ValidationError(
                 {key: "Trường này không được cập nhật bởi đại diện CLB." for key in invalid}
             )
-        for key in allowed.intersection(request.data):
-            setattr(organization, key, request.data[key])
-        organization.full_clean()
-        organization.save(update_fields=list(allowed.intersection(request.data)))
-        return Response(OrganizationSerializer(organization).data)
+        serializer = OrganizationSerializer(organization, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 
 class UserProfileView(APIView):
@@ -135,7 +150,7 @@ class UserProfileView(APIView):
 
 
 class AdminUserListView(APIView):
-    permission_classes = [IsAuthenticated, HasPermission("organization.manage")]
+    permission_classes = [IsAuthenticated, IsAdminRole, HasPermission("organization.manage")]
 
     def get(self, request):
         queryset = User.objects.select_related("booking_profile__role", "booking_profile__organization")
@@ -147,7 +162,13 @@ class AdminUserListView(APIView):
         return Response(UserAdminSerializer(queryset, many=True).data)
 
     def post(self, request):
-        serializer = UserAdminSerializer(data=request.data)
+        payload = request.data.copy()
+        generated_password = None
+        if not payload.get("password"):
+            generated_password = f"UET@{get_random_string(10)}"
+            payload["password"] = generated_password
+            payload["must_change_password"] = True
+        serializer = UserAdminSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
         role_name = serializer.validated_data.get("role", "CLB_REP")
         if not getattr(request.user, "is_superuser", False) and role_name != "CLB_REP":
@@ -155,15 +176,28 @@ class AdminUserListView(APIView):
         organization = serializer.validated_data.get("organization")
         if not organization:
             serializer.validated_data["organization"] = _user_organization(request.user)
+        if role_name == "CLB_REP" and not serializer.validated_data.get("organization"):
+            raise ValidationError({"organization": "Cần chọn CLB cho tài khoản đại diện."})
         user = serializer.save()
-        return Response(UserAdminSerializer(user).data, status=status.HTTP_201_CREATED)
+        AuditLog.objects.create(
+            user=request.user,
+            action="create_user",
+            entity_type="User",
+            entity_id=str(user.pk),
+            new_value=_user_audit_snapshot(user),
+        )
+        data = UserAdminSerializer(user).data
+        if generated_password:
+            data["password"] = generated_password
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 class AdminUserDetailView(APIView):
-    permission_classes = [IsAuthenticated, HasPermission("organization.manage")]
+    permission_classes = [IsAuthenticated, IsAdminRole, HasPermission("organization.manage")]
 
     def patch(self, request, pk):
         user = self._get_user(request, pk)
+        old_value = _user_audit_snapshot(user)
         serializer = UserAdminSerializer(user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         role_name = serializer.validated_data.get("role")
@@ -174,6 +208,14 @@ class AdminUserDetailView(APIView):
         ):
             raise PermissionDenied("Chỉ Super Admin được cấp role quản trị.")
         serializer.save()
+        AuditLog.objects.create(
+            user=request.user,
+            action="update_user",
+            entity_type="User",
+            entity_id=str(user.pk),
+            old_value=old_value,
+            new_value=_user_audit_snapshot(user),
+        )
         return Response(UserAdminSerializer(user).data)
 
     def post(self, request, pk):
@@ -190,6 +232,13 @@ class AdminUserDetailView(APIView):
         if profile:
             profile.must_change_password = True
             profile.save(update_fields=["must_change_password"])
+        AuditLog.objects.create(
+            user=request.user,
+            action="reset_user_password",
+            entity_type="User",
+            entity_id=str(user.pk),
+            new_value={"must_change_password": True},
+        )
         return Response({"detail": "Đã đặt lại mật khẩu.", "password": password})
 
     def _get_user(self, request, pk):
@@ -200,6 +249,41 @@ class AdminUserDetailView(APIView):
         if not is_admin(request.user) and get_user_organization_id(user) != get_user_organization_id(request.user):
             raise PermissionDenied()
         return user
+
+
+class OrganizationViewSet(
+    mixins.CreateModelMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = Organization.objects.all()
+    serializer_class = OrganizationSerializer
+    permission_classes = [IsAuthenticated, IsAdminRole, HasPermission("organization.manage")]
+
+    def perform_create(self, serializer):
+        organization = serializer.save()
+        AuditLog.objects.create(
+            user=self.request.user,
+            action="create_organization",
+            entity_type="Organization",
+            entity_id=str(organization.pk),
+            new_value=OrganizationSerializer(organization).data,
+        )
+
+    def perform_update(self, serializer):
+        organization = self.get_object()
+        old_value = OrganizationSerializer(organization).data
+        organization = serializer.save()
+        AuditLog.objects.create(
+            user=self.request.user,
+            action="update_organization",
+            entity_type="Organization",
+            entity_id=str(organization.pk),
+            old_value=old_value,
+            new_value=OrganizationSerializer(organization).data,
+        )
 
 
 class CampusViewSet(viewsets.ModelViewSet):
@@ -269,11 +353,25 @@ class RoomViewSet(viewsets.ModelViewSet):
         if building_id:
             queryset = queryset.filter(building_id=building_id)
 
-        rooms = [
-            room
-            for room in queryset
-            if _room_is_available(room, start_time, end_time)
-        ]
+        exclude_booking_id = request.query_params.get("exclude_booking")
+        exclude_booking = None
+        if exclude_booking_id:
+            exclude_booking = (
+                filter_bookings_for_user(Booking.objects.all(), request.user)
+                .filter(pk=exclude_booking_id)
+                .first()
+            )
+            if exclude_booking is None:
+                raise ValidationError(
+                    {"exclude_booking": "Booking loại trừ không hợp lệ."}
+                )
+
+        rooms = booking_service.get_available_rooms(
+            start_time,
+            end_time,
+            current_booking_id=exclude_booking.pk if exclude_booking else None,
+            queryset=queryset,
+        )
 
         serializer = self.get_serializer(rooms, many=True)
         return Response(serializer.data)
@@ -283,6 +381,7 @@ class BookingViewSet(
     mixins.CreateModelMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
     serializer_class = BookingSerializer
@@ -324,6 +423,58 @@ class BookingViewSet(
     def perform_create(self, serializer):
         serializer.save()
 
+    def perform_update(self, serializer):
+        booking = self.get_object()
+        if not is_admin(self.request.user) and booking.status not in {
+            BookingStatus.DRAFT,
+            BookingStatus.PENDING_HOLD,
+            BookingStatus.NEEDS_REVISION,
+        }:
+            raise PermissionDenied(
+                "CLB chỉ được sửa đơn khi đơn chưa được duyệt và chưa xác nhận bản cứng."
+            )
+        if (
+            not is_admin(self.request.user)
+            and booking.physical_status == PhysicalStatus.CONFIRMED_RECEIVED
+        ):
+            raise PermissionDenied(
+                "Đơn đã được VP Đoàn xác nhận nhận bản cứng, CLB không thể chỉnh sửa."
+            )
+        old_value = {
+            "room_id": booking.room_id,
+            "secondary_room_id": booking.secondary_room_id,
+            "start_time": booking.start_time.isoformat(),
+            "end_time": booking.end_time.isoformat(),
+            "activity_name": booking.activity_name,
+            "participant_count": booking.participant_count,
+        }
+        try:
+            with transaction.atomic():
+                instance = serializer.save()
+                instance.full_clean()
+                if instance.status in CONFLICT_STATUSES:
+                    booking_service.validate_active_booking_schedule(instance)
+                instance.save()
+                AuditLog.objects.create(
+                    user=self.request.user,
+                    action="update",
+                    entity_type="Booking",
+                    entity_id=str(instance.pk),
+                    old_value=old_value,
+                    new_value={
+                        "room_id": instance.room_id,
+                        "secondary_room_id": instance.secondary_room_id,
+                        "start_time": instance.start_time.isoformat(),
+                        "end_time": instance.end_time.isoformat(),
+                        "activity_name": instance.activity_name,
+                        "participant_count": instance.participant_count,
+                    },
+                )
+        except DjangoValidationError as exc:
+            raise ValidationError(_serialize_django_validation_error(exc)) from exc
+        except IntegrityError as exc:
+            raise ValidationError("Phòng đã có lịch trùng trong khoảng thời gian này.") from exc
+
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
         booking = self.get_object()
@@ -353,6 +504,24 @@ class BookingViewSet(
             serializer.validated_data["file"],
             request.user,
         )
+
+    @action(detail=True, methods=["get"], url_path="scan")
+    def scan(self, request, pk=None):
+        booking = self.get_object()
+        media_prefix = settings.MEDIA_URL.rstrip("/") + "/"
+        path = unquote(urlparse(booking.scan_file_url).path)
+        if not path.startswith(media_prefix):
+            raise Http404()
+        storage_path = path[len(media_prefix):]
+        parts = PurePosixPath(storage_path).parts
+        if not parts or any(part in {".", ".."} for part in parts):
+            raise Http404()
+        try:
+            stored_file = default_storage.open(storage_path, "rb")
+        except (FileNotFoundError, OSError):
+            raise Http404() from None
+        content_type = mimetypes.guess_type(storage_path)[0] or "application/octet-stream"
+        return FileResponse(stored_file, content_type=content_type)
 
     @action(detail=True, methods=["post"], url_path="confirm-physical")
     def confirm_physical(self, request, pk=None):
@@ -424,6 +593,67 @@ class BookingViewSet(
             serializer.validated_data.get("reason"),
         )
 
+    @action(detail=False, methods=["get"], url_path="calendar")
+    def calendar(self, request):
+        queryset = (
+            Booking.objects.select_related(
+                "organization",
+                "room",
+                "room__building",
+                "room__building__campus",
+                "secondary_room",
+                "created_by",
+            )
+            .filter(status__in=CONFLICT_STATUSES)
+            .order_by("start_time")
+        )
+        queryset = _apply_booking_filters(queryset, request.query_params)
+        user_org_id = get_user_organization_id(request.user)
+        admin = is_admin(request.user)
+        data = []
+        for booking in queryset:
+            own = user_org_id is not None and booking.organization_id == user_org_id
+            if admin or own:
+                data.append(self.get_serializer(booking).data)
+                continue
+            data.append(
+                {
+                    "id": f"busy-{booking.room_id}-{booking.start_time.isoformat()}",
+                    "organization": None,
+                    "organization_name": "",
+                    "organization_profile": None,
+                    "room": booking.room_id,
+                    "room_name": booking.room.name,
+                    "secondary_room": None,
+                    "activity_name": "Không khả dụng",
+                    "description": "",
+                    "participant_count": 0,
+                    "contact_person": "",
+                    "contact_phone": "",
+                    "contact_email": "",
+                    "start_time": booking.start_time,
+                    "end_time": booking.end_time,
+                    "setup_time_minutes": 0,
+                    "teardown_time_minutes": 0,
+                    "equipment_request": {},
+                    "notes": "",
+                    "status": BookingStatus.PENDING_HOLD,
+                    "physical_status": PhysicalStatus.NOT_SUBMITTED,
+                    "scan_file_url": "",
+                    "physical_submitted_at": None,
+                    "physical_confirmed_at": None,
+                    "physical_confirmed_by": None,
+                    "hold_expires_at": None,
+                    "campus_id": booking.room.building.campus_id,
+                    "building_id": booking.room.building_id,
+                    "created_by_id": None,
+                    "created_at": None,
+                    "updated_at": None,
+                    "hidden_details": True,
+                }
+            )
+        return Response(data)
+
     def _service_response(self, service_func, *args):
         try:
             booking = service_func(*args)
@@ -438,13 +668,138 @@ class BookingViewSet(
 
 class RoomBlackoutViewSet(viewsets.ModelViewSet):
     serializer_class = RoomBlackoutSerializer
-    permission_classes = [IsAuthenticated, HasPermission("blackout.manage")]
+    permission_classes = [IsAuthenticated, AdminWriteOrReadOnly]
+    write_permission_key = "blackout.manage"
 
     def get_queryset(self):
         return RoomBlackout.objects.select_related("building", "created_by").all()
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        blackout = serializer.save(created_by=self.request.user)
+        AuditLog.objects.create(
+            user=self.request.user,
+            action="create",
+            entity_type="RoomBlackout",
+            entity_id=str(blackout.pk),
+            new_value=RoomBlackoutSerializer(blackout).data,
+        )
+
+    def perform_destroy(self, instance):
+        old_value = RoomBlackoutSerializer(instance).data
+        pk = instance.pk
+        instance.delete()
+        AuditLog.objects.create(
+            user=self.request.user,
+            action="delete",
+            entity_type="RoomBlackout",
+            entity_id=str(pk),
+            old_value=old_value,
+        )
+
+
+class BusinessRuleConfigViewSet(viewsets.ModelViewSet):
+    queryset = BusinessRuleConfig.objects.all()
+    serializer_class = BusinessRuleConfigSerializer
+    permission_classes = [IsAuthenticated, AdminWriteOrReadOnly]
+    write_permission_key = "rule_config.manage"
+    lookup_field = "key"
+
+    def perform_create(self, serializer):
+        instance = serializer.save(updated_by=self.request.user)
+        AuditLog.objects.create(
+            user=self.request.user,
+            action="create",
+            entity_type="BusinessRuleConfig",
+            entity_id=instance.key,
+            new_value=BusinessRuleConfigSerializer(instance).data,
+        )
+
+    def perform_update(self, serializer):
+        old_value = BusinessRuleConfigSerializer(self.get_object()).data
+        instance = serializer.save(updated_by=self.request.user)
+        AuditLog.objects.create(
+            user=self.request.user,
+            action="update",
+            entity_type="BusinessRuleConfig",
+            entity_id=instance.key,
+            old_value=old_value,
+            new_value=BusinessRuleConfigSerializer(instance).data,
+        )
+
+
+class DocumentTemplateViewSet(viewsets.ModelViewSet):
+    queryset = DocumentTemplate.objects.all()
+    serializer_class = DocumentTemplateSerializer
+    permission_classes = [IsAuthenticated, AdminWriteOrReadOnly]
+    write_permission_key = "document_template.manage"
+    lookup_field = "template_type"
+
+    def perform_create(self, serializer):
+        instance = serializer.save(updated_by=self.request.user)
+        AuditLog.objects.create(
+            user=self.request.user,
+            action="create",
+            entity_type="DocumentTemplate",
+            entity_id=instance.template_type,
+            new_value=DocumentTemplateSerializer(instance).data,
+        )
+
+    def perform_update(self, serializer):
+        old_value = DocumentTemplateSerializer(self.get_object()).data
+        instance = serializer.save(updated_by=self.request.user)
+        AuditLog.objects.create(
+            user=self.request.user,
+            action="update",
+            entity_type="DocumentTemplate",
+            entity_id=instance.template_type,
+            old_value=old_value,
+            new_value=DocumentTemplateSerializer(instance).data,
+        )
+
+
+class NotificationViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = Notification.objects.filter(user=self.request.user)
+        unread = self.request.query_params.get("unread")
+        if unread is not None:
+            queryset = queryset.filter(is_read=not _parse_bool(unread))
+        return queryset.select_related("related_booking")
+
+    def partial_update(self, request, *args, **kwargs):
+        invalid = set(request.data) - {"is_read"}
+        if invalid:
+            raise ValidationError(
+                {key: "Truong nay khong duoc cap nhat." for key in invalid}
+            )
+        return super().partial_update(request, *args, **kwargs)
+
+    @action(detail=False, methods=["post"], url_path="mark-all-read")
+    def mark_all_read(self, request):
+        updated = self.get_queryset().filter(is_read=False).update(is_read=True)
+        return Response({"updated": updated})
+
+
+class AuditLogViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    serializer_class = AuditLogSerializer
+    permission_classes = [IsAuthenticated, HasPermission("audit_log.view")]
+
+    def get_queryset(self):
+        queryset = AuditLog.objects.select_related("user").all()
+        entity_type = self.request.query_params.get("entity_type")
+        action = self.request.query_params.get("action")
+        if entity_type:
+            queryset = queryset.filter(entity_type=entity_type)
+        if action:
+            queryset = queryset.filter(action=action)
+        return queryset
 
 
 def _apply_booking_filters(queryset, params):
@@ -474,40 +829,6 @@ def _apply_booking_filters(queryset, params):
         queryset = queryset.filter(start_time__date=parsed_date)
 
     return queryset
-
-
-def _room_is_available(room, start_time, end_time):
-    buffered_start, buffered_end = _buffered_requested_range(room, start_time, end_time)
-
-    has_booking_conflict = Booking.objects.filter(
-        room=room,
-        status__in=CONFLICT_STATUSES,
-        during__overlap=(buffered_start, buffered_end),
-    ).exists()
-    if has_booking_conflict:
-        return False
-
-    has_blackout_conflict = (
-        RoomBlackout.objects.filter(
-            start_time__lt=buffered_end,
-            end_time__gt=buffered_start,
-        )
-        .filter(
-            Q(scope_type="room", room_ids__contains=[room.pk])
-            | Q(scope_type="building", building=room.building)
-            | Q(scope_type="floor", building=room.building, floor=room.floor)
-        )
-        .exists()
-    )
-
-    return not has_blackout_conflict
-
-
-def _buffered_requested_range(room, start_time, end_time):
-    return (
-        start_time - timedelta(minutes=room.buffer_before_minutes),
-        end_time + timedelta(minutes=room.buffer_after_minutes),
-    )
 
 
 def _parse_required_datetime(value, field_name):
@@ -557,10 +878,26 @@ def _user_data(user, profile):
     }
 
 
+def _user_audit_snapshot(user):
+    profile = getattr(user, "booking_profile", None)
+    return {
+        "username": user.get_username(),
+        "email": user.email,
+        "is_active": user.is_active,
+        "role": profile.role.name if profile else None,
+        "organization_id": profile.organization_id if profile else None,
+        "must_change_password": profile.must_change_password if profile else False,
+    }
+
+
 __all__ = [
+    "AuditLogViewSet",
     "BookingViewSet",
     "BuildingViewSet",
+    "BusinessRuleConfigViewSet",
     "CampusViewSet",
+    "DocumentTemplateViewSet",
+    "NotificationViewSet",
     "RoomBlackoutViewSet",
     "RoomViewSet",
     "TokenObtainPairView",

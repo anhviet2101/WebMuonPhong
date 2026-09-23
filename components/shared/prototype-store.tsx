@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import {
   createContext,
@@ -8,7 +8,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import axios from "axios";
+import { toast } from "sonner";
 import { api, endpoints } from "@/lib/api";
+import { isClubRole, useAuth } from "@/components/auth/auth-context";
 
 export type CampusId = string;
 export type Equipment =
@@ -26,21 +29,34 @@ export type BookingStatus =
 export type PhysicalStatus =
   "not_submitted" | "submitted" | "confirmed_received";
 
-export type Campus = { id: CampusId; name: string; code: string };
+export type Campus = { id: CampusId; name: string; code: string; address?: string; active?: boolean };
 export type Building = {
   id: string;
   campusId: CampusId;
   name: string;
   code: string;
+  active?: boolean;
 };
 export type Room = {
   id: string;
   buildingId: string;
   name: string;
-  capacity: number;
+  floor?: number;
+  capacity: number | null;
   equipment: Equipment[];
   rentable: boolean;
   bufferMinutes: number;
+  active?: boolean;
+};
+export type OrganizationProfile = {
+  id?: string;
+  name?: string;
+  abbreviation?: string;
+  address?: string;
+  representative_name?: string;
+  hotline?: string;
+  contact_email?: string;
+  fanpage_url?: string;
 };
 export type Booking = {
   id: string;
@@ -61,6 +77,9 @@ export type Booking = {
   status: BookingStatus;
   physicalStatus: PhysicalStatus;
   scanName?: string;
+  scanFileUrl?: string;
+  organizationProfile?: OrganizationProfile;
+  hiddenDetails?: boolean;
   holdExpiresAt?: string;
   note?: string;
   createdAt: string;
@@ -68,6 +87,9 @@ export type Booking = {
 export type Blackout = {
   id: string;
   roomIds: string[];
+  scopeType?: "room" | "building" | "floor";
+  buildingId?: string;
+  floor?: number;
   startAt: string;
   endAt: string;
   reason: string;
@@ -89,192 +111,36 @@ export type Notification = {
   read: boolean;
   bookingId?: string;
 };
+export type DocumentTemplateContent = {
+  leftHeader: string;
+  rightHeader: string;
+  title: string;
+  recipient: string;
+  intro: string;
+  commitment: string;
+  closing: string;
+  leftSignature: string;
+  rightSignature: string;
+};
+export type DocumentTemplate = {
+  id?: string;
+  templateType: "mau_a" | "mau_b";
+  name: string;
+  content: DocumentTemplateContent;
+  active: boolean;
+};
 
-const campuses: Campus[] = [
-  { id: "km", code: "KM", name: "Kiều Mai" },
-  { id: "xt", code: "XT", name: "Xuân Thủy" },
-  { id: "hl", code: "HL", name: "Hòa Lạc" },
-];
-const buildings: Building[] = [
-  { id: "km-a", campusId: "km", code: "A", name: "Tòa A" },
-  { id: "xt-g2", campusId: "xt", code: "G2", name: "Giảng đường G2" },
-  { id: "xt-g3", campusId: "xt", code: "G3", name: "Giảng đường G3" },
-  { id: "hl-alpha", campusId: "hl", code: "AL", name: "Alpha" },
-];
-
-const equipmentSets: Equipment[][] = [
-  ["projector", "ac", "whiteboard"],
-  ["projector", "microphone", "ac"],
-  ["projector", "microphone", "sound", "ac"],
-];
-const initialRooms: Room[] = [
-  ...Array.from({ length: 35 }, (_, index) => {
-    const floor = Math.floor(index / 10) + 1;
-    const number = floor * 100 + (index % 10) + 1;
-    return {
-      id: `km-${number}`,
-      buildingId: "km-a",
-      name: `KM-${number}`,
-      capacity: 40 + (index % 4) * 10,
-      equipment: equipmentSets[index % 3],
-      rentable: index !== 8,
-      bufferMinutes: 15,
-    } satisfies Room;
-  }),
-  {
-    id: "xt-g2-201",
-    buildingId: "xt-g2",
-    name: "G2-201",
-    capacity: 70,
-    equipment: equipmentSets[0],
-    rentable: true,
-    bufferMinutes: 15,
-  },
-  {
-    id: "xt-g3-hall",
-    buildingId: "xt-g3",
-    name: "Hội trường G3",
-    capacity: 180,
-    equipment: equipmentSets[2],
-    rentable: true,
-    bufferMinutes: 15,
-  },
-  {
-    id: "xt-g3-204",
-    buildingId: "xt-g3",
-    name: "G3-204",
-    capacity: 65,
-    equipment: equipmentSets[1],
-    rentable: true,
-    bufferMinutes: 15,
-  },
-  {
-    id: "hl-alpha-101",
-    buildingId: "hl-alpha",
-    name: "AL-101",
-    capacity: 90,
-    equipment: equipmentSets[2],
-    rentable: true,
-    bufferMinutes: 15,
-  },
-];
-
-function at(dayOffset: number, hour: number, minute = 0) {
-  const date = new Date();
-  date.setDate(date.getDate() + dayOffset);
-  date.setHours(hour, minute, 0, 0);
-  return date.toISOString();
-}
-const initialBookings: Booking[] = [
-  {
-    id: "BR-2609-104",
-    clubCode: "MEC",
-    clubName: "CLB Truyền thông & Sự kiện",
-    activityName: "Workshop UX cho tân sinh viên",
-    description: "Thực hành quy trình thiết kế sản phẩm số.",
-    roomId: "km-201",
-    backupRoomId: "km-202",
-    startAt: at(3, 8),
-    endAt: at(3, 11),
-    participants: 72,
-    contactPerson: "Nguyễn Minh Anh",
-    contactPhone: "0912 345 678",
-    contactEmail: "minhanh.mec@university.edu.vn",
-    equipment: ["projector", "microphone"],
-    status: "pending_hold",
-    physicalStatus: "submitted",
-    scanName: "mau-a-mec.pdf",
-    holdExpiresAt: at(2, 17),
-    createdAt: at(-1, 9),
-  },
-  {
-    id: "BR-2609-105",
-    clubCode: "RBC",
-    clubName: "CLB Robotics",
-    activityName: "Demo robot tự hành",
-    description: "Trình diễn sản phẩm cuối kỳ.",
-    roomId: "xt-g3-hall",
-    startAt: at(5, 18),
-    endAt: at(5, 20, 30),
-    participants: 150,
-    contactPerson: "Trần Gia Huy",
-    contactPhone: "0988 112 233",
-    contactEmail: "robotics@university.edu.vn",
-    equipment: ["projector", "microphone", "sound"],
-    status: "pending_hold",
-    physicalStatus: "confirmed_received",
-    holdExpiresAt: at(2, 12),
-    createdAt: at(-2, 10),
-  },
-  {
-    id: "BR-2609-106",
-    clubCode: "MEC",
-    clubName: "CLB Truyền thông & Sự kiện",
-    activityName: "Tập huấn MC nội bộ",
-    description: "Huấn luyện dẫn chương trình.",
-    roomId: "km-102",
-    startAt: at(2, 14),
-    endAt: at(2, 16),
-    participants: 35,
-    contactPerson: "Nguyễn Minh Anh",
-    contactPhone: "0912 345 678",
-    contactEmail: "minhanh.mec@university.edu.vn",
-    equipment: ["microphone"],
-    status: "needs_revision",
-    physicalStatus: "not_submitted",
-    holdExpiresAt: at(2, 18),
-    note: "Bổ sung số điện thoại người phụ trách tại hiện trường.",
-    createdAt: at(-1, 14),
-  },
-  {
-    id: "BR-2609-107",
-    clubCode: "ECS",
-    clubName: "CLB Tiếng Anh",
-    activityName: "English Speaking Night",
-    description: "Sinh hoạt tiếng Anh theo chủ đề.",
-    roomId: "km-101",
-    startAt: at(0, 8),
-    endAt: at(0, 10),
-    participants: 44,
-    contactPerson: "Phạm Quỳnh Chi",
-    contactPhone: "0903 222 111",
-    contactEmail: "english@university.edu.vn",
-    equipment: ["projector"],
-    status: "pending_hold",
-    physicalStatus: "not_submitted",
-    holdExpiresAt: at(1, 15),
-    createdAt: at(-1, 8),
-  },
-  {
-    id: "BR-2609-108",
-    clubCode: "BKC",
-    clubName: "CLB Sách",
-    activityName: "Ngày hội trao đổi sách",
-    description: "Trao đổi sách cũ và giao lưu tác giả.",
-    roomId: "km-302",
-    startAt: at(1, 13, 30),
-    endAt: at(1, 16),
-    participants: 60,
-    contactPerson: "Vũ Hà Linh",
-    contactPhone: "0911 777 555",
-    contactEmail: "bookclub@university.edu.vn",
-    equipment: ["projector", "ac"],
-    status: "approved",
-    physicalStatus: "confirmed_received",
-    scanName: "mau-a-bkc.pdf",
-    createdAt: at(-4, 9),
-  },
-];
-const initialBlackouts: Blackout[] = [
-  {
-    id: "BO-001",
-    roomIds: ["km-101", "km-102", "km-201", "km-302"],
-    startAt: at(0, 10),
-    endAt: at(0, 12),
-    reason: "Phục vụ kỳ thi",
-    note: "Khóa phục vụ kỳ thi",
-  },
-];
+export const defaultDocumentTemplateContent: DocumentTemplateContent = {
+  leftHeader: "ĐOÀN ĐẠI HỌC QUỐC GIA HÀ NỘI\nBCH TRƯỜNG ĐẠI HỌC CÔNG NGHỆ\n***",
+  rightHeader: "ĐOÀN TNCS HỒ CHÍ MINH",
+  title: "ĐƠN ĐỀ NGHỊ",
+  recipient: "Kính gửi: Phòng Hành chính Quản trị và Tổ chức Cán bộ",
+  intro: "Văn phòng Đoàn tổng hợp lịch mượn phòng theo danh sách bên dưới.",
+  commitment: "Các đơn vị cam kết sử dụng phòng đúng mục đích và hoàn trả nguyên trạng cơ sở vật chất sau khi sử dụng.",
+  closing: "Kính mong Quý Phòng xem xét và hỗ trợ. Xin trân trọng cảm ơn!",
+  leftSignature: "Ý KIẾN\nPHÒNG HCQT & TCCB",
+  rightSignature: "TM. BCH ĐOÀN TRƯỜNG\nUV BAN THƯỜNG VỤ",
+};
 
 type NewBooking = Omit<
   Booking,
@@ -286,55 +152,86 @@ type Store = {
   rooms: Room[];
   bookings: Booking[];
   blackouts: Blackout[];
-  addBooking: (data: NewBooking) => Booking;
-  updateBooking: (id: string, patch: Partial<Booking>) => void;
-  cancelBooking: (id: string) => void;
-  uploadScan: (id: string, file: File | string) => void;
-  addBlackout: (data: Omit<Blackout, "id">) => void;
-  addRoom: (data: Omit<Room, "id">) => void;
-  updateRoom: (id: string, patch: Partial<Room>) => void;
-  isRoomAvailable: (
-    roomId: string,
-    startAt: string,
-    endAt: string,
-    excludeId?: string,
-  ) => boolean;
+  documentTemplates: DocumentTemplate[];
+  addCampus: (data: Omit<Campus, "id">) => Promise<void>;
+  updateCampus: (id: string, patch: Partial<Campus>) => Promise<void>;
+  addBuilding: (data: Omit<Building, "id">) => Promise<void>;
+  updateBuilding: (id: string, patch: Partial<Building>) => Promise<void>;
+  addBooking: (data: NewBooking) => Promise<Booking>;
+  updateBooking: (id: string, patch: Partial<Booking>) => Promise<void>;
+  cancelBooking: (id: string, reason?: string) => Promise<void>;
+  uploadScan: (id: string, file: File | string) => Promise<void>;
+  addBlackout: (data: Omit<Blackout, "id">) => Promise<void>;
+  addRoom: (data: Omit<Room, "id">) => Promise<void>;
+  updateRoom: (id: string, patch: Partial<Room>) => Promise<void>;
+  updateDocumentTemplate: (
+    templateType: DocumentTemplate["templateType"],
+    patch: Partial<DocumentTemplate>,
+  ) => Promise<void>;
   supportContact: SupportContact;
-  updateSupportContact: (data: SupportContact) => void;
+  updateSupportContact: (data: SupportContact) => Promise<void>;
   notifications: Notification[];
-  markNotificationRead: (id: string) => void;
-  markAllNotificationsRead: (audience: "club" | "admin") => void;
+  markNotificationRead: (id: string) => Promise<void>;
+  markAllNotificationsRead: (audience: "club" | "admin") => Promise<void>;
 };
 
 const StoreContext = createContext<Store | null>(null);
-const activeStatuses: BookingStatus[] = [
-  "pending_hold",
-  "needs_revision",
-  "approved",
-  "room_changed",
-];
 
 export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  const admin = Boolean(user && !isClubRole(user.role));
   const [campusList, setCampusList] = useState<Campus[]>([]);
   const [buildingList, setBuildingList] = useState<Building[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [blackouts, setBlackouts] = useState<Blackout[]>([]);
+  const [documentTemplates, setDocumentTemplates] = useState<DocumentTemplate[]>([]);
   const [supportContact, setSupportContact] = useState<SupportContact>({
-      name: "Nguyễn Thu Hà",
-      role: "Cán bộ VP Đoàn",
-      phone: "024 3754 7461",
-      email: "vpdoan@vnu.edu.vn",
-      shift: "08:00 - 17:30, Thứ Hai - Thứ Sáu",
+      name: "",
+      role: "",
+      phone: "",
+      email: "",
+      shift: "",
   });
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const mapCampus = (c: any): Campus => ({ id: String(c.id) as CampusId, code: c.code, name: c.name });
-  const mapBuilding = (b: any): Building => ({ id: String(b.id), campusId: String(b.campus) as CampusId, code: b.campus_code ?? "", name: b.name });
+  const extractApiErrorMessage = (error: unknown): string => {
+    if (!axios.isAxiosError(error)) return "";
+
+    const payload = error.response?.data;
+    if (typeof payload === "string") {
+      return payload.trim();
+    }
+    if (payload && typeof payload === "object") {
+      const detail = (payload as { detail?: unknown }).detail;
+      if (typeof detail === "string" && detail.trim()) return detail.trim();
+      if (Array.isArray(detail)) {
+        const message = detail.filter((item) => typeof item === "string" && item.trim()).join(", ");
+        if (message) return message;
+      }
+
+      const nonFieldErrors = (payload as { non_field_errors?: unknown[] }).non_field_errors;
+      if (Array.isArray(nonFieldErrors)) {
+        const message = nonFieldErrors.filter((item) => typeof item === "string" && item.trim()).join(", ");
+        if (message) return message;
+      }
+
+      const message = (payload as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim()) return message.trim();
+    }
+
+    return "";
+  };
+  const showApiError = (error: unknown, fallback: string) => {
+    const detail = extractApiErrorMessage(error);
+    toast.error(detail ? `${fallback}: ${detail}` : fallback);
+  };
+  const mapCampus = (c: any): Campus => ({ id: String(c.id) as CampusId, code: c.code, name: c.name, address: c.address, active: c.active });
+  const mapBuilding = (b: any): Building => ({ id: String(b.id), campusId: String(b.campus) as CampusId, code: b.campus_code ?? "", name: b.name, active: b.active });
   const mapRoom = (r: any): Room => ({
-    id: String(r.id), buildingId: String(r.building), name: r.name, capacity: r.capacity,
+    id: String(r.id), buildingId: String(r.building), name: r.name, floor: r.floor, capacity: r.capacity,
     equipment: (["projector","microphone","ac","whiteboard","sound"] as Equipment[]).filter((e) =>
       e === "projector" ? r.has_projector : e === "microphone" ? r.has_microphone : e === "ac" ? r.has_ac : e === "whiteboard" ? r.has_whiteboard : r.has_sound_system),
-    rentable: r.rentable && r.active, bufferMinutes: Math.max(r.buffer_before_minutes ?? 0, r.buffer_after_minutes ?? 0),
+    rentable: r.rentable && r.active, bufferMinutes: Math.max(r.buffer_before_minutes ?? 0, r.buffer_after_minutes ?? 0), active: r.active,
   });
   const mapBooking = (b: any): Booking => ({
     id: String(b.id), clubCode: b.organization?.toString() ?? "", clubName: b.organization_name ?? "CLB",
@@ -343,21 +240,75 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     contactPhone: b.contact_phone, contactEmail: b.contact_email,     equipment: Object.entries(b.equipment_request ?? {})
       .filter(([, enabled]) => Boolean(enabled))
       .map(([name]) => name as Equipment),
-    status: b.status, physicalStatus: b.physical_status, scanName: b.scan_file_url?.split("/").pop(),
+    status: b.status, physicalStatus: b.physical_status, scanName: b.scan_file_url?.split("/").pop(), scanFileUrl: b.scan_file_url,
+    organizationProfile: b.organization_profile, hiddenDetails: Boolean(b.hidden_details),
     holdExpiresAt: b.hold_expires_at, note: b.notes, createdAt: b.created_at,
   });
+  const mapNotification = (n: any): Notification => ({
+    id: String(n.id),
+    audience: window.location.pathname.includes("admin") ? "admin" : "club",
+    title: notificationTitle(n.type),
+    message: n.message,
+    createdAt: n.created_at,
+    read: Boolean(n.is_read),
+    bookingId: n.related_booking ? String(n.related_booking) : undefined,
+  });
+  const mapDocumentTemplate = (template: any): DocumentTemplate => ({
+    id: String(template.id),
+    templateType: template.template_type,
+    name: template.name,
+    content: { ...defaultDocumentTemplateContent, ...(template.content ?? {}) },
+    active: Boolean(template.active),
+  });
+  const notificationTitle = (type: string) =>
+    ({
+      submitted: "Cập nhật đơn",
+      approved: "Đơn đã được duyệt",
+      rejected: "Đơn bị từ chối",
+      needs_revision: "Đơn cần chỉnh sửa",
+      room_changed: "Phòng đã thay đổi",
+      cancelled: "Đơn đã bị hủy",
+      physical_reminder: "Nhắc nộp bản cứng",
+      expired: "Đơn hết hạn giữ chỗ",
+    })[type] ?? "Thông báo";
   useEffect(() => {
-    Promise.all([
-      api.get(endpoints.campuses), api.get(endpoints.buildings), api.get(endpoints.rooms),
-      api.get(endpoints.bookings), api.get(endpoints.blackouts),
-    ]).then(([campusesResponse, buildingsResponse, roomsResponse, bookingsResponse, blackoutsResponse]) => {
-      setCampusList((campusesResponse.data.results ?? campusesResponse.data).map(mapCampus));
-      setBuildingList((buildingsResponse.data.results ?? buildingsResponse.data).map(mapBuilding));
-      setRooms((roomsResponse.data.results ?? roomsResponse.data).map(mapRoom));
-      setBookings((bookingsResponse.data.results ?? bookingsResponse.data).map(mapBooking));
-      setBlackouts((blackoutsResponse.data.results ?? blackoutsResponse.data).map((b: any) => ({ ...b, id: String(b.id), roomIds: (b.room_ids ?? []).map(String), startAt: b.start_time, endAt: b.end_time, reason: b.reason ?? "", note: b.note })));
-    }).catch(() => undefined);
-  }, []);
+    const load = async <T,>(
+      request: Promise<{ data: T }>,
+      apply: (data: T) => void,
+      fallback: string,
+      options: { quiet?: boolean; quietForbidden?: boolean } = {},
+    ) => {
+      try {
+        const { data } = await request;
+        apply(data);
+      } catch (error) {
+        if (options.quiet) return;
+        if (
+          options.quietForbidden &&
+          axios.isAxiosError(error) &&
+          [401, 403, 404].includes(error.response?.status ?? 0)
+        ) {
+          return;
+        }
+        showApiError(error, fallback);
+      }
+    };
+    const requests = [
+      load(api.get(endpoints.campuses), (data: any) => setCampusList((data.results ?? data).map(mapCampus)), "Không thể tải danh sách cơ sở"),
+      load(api.get(endpoints.buildings), (data: any) => setBuildingList((data.results ?? data).map(mapBuilding)), "Không thể tải danh sách tòa nhà"),
+      load(api.get(endpoints.rooms), (data: any) => setRooms((data.results ?? data).map(mapRoom)), "Không thể tải danh sách phòng"),
+      load(api.get(endpoints.bookings), (data: any) => setBookings((data.results ?? data).map(mapBooking)), "Không thể tải danh sách đơn"),
+      load(api.get(endpoints.blackouts), (data: any) => setBlackouts((data.results ?? data).map((b: any) => ({ id: String(b.id), roomIds: (b.room_ids ?? []).map(String), scopeType: b.scope_type, buildingId: b.building ? String(b.building) : undefined, floor: b.floor, startAt: b.start_time, endAt: b.end_time, reason: b.reason ?? "", note: b.note }))), "Không thể tải danh sách khóa phòng", { quiet: !admin }),
+      load(api.get(endpoints.notifications), (data: any) => setNotifications((data.results ?? data).map(mapNotification)), "Không thể tải thông báo", { quiet: true }),
+      load(api.get(endpoints.documentTemplates), (data: any) => setDocumentTemplates((data.results ?? data).map(mapDocumentTemplate)), "Không thể tải mẫu đơn", { quiet: !admin }),
+      load(api.get(`${endpoints.ruleConfigs}support_contact/`), (data: any) => {
+        if (data.value && typeof data.value === "object") {
+          setSupportContact((current) => ({ ...current, ...data.value }));
+        }
+      }, "Không thể tải cán bộ trực", { quiet: true }),
+    ];
+    void Promise.all(requests);
+  }, [admin]);
   useEffect(() => {
     const checkExpiringHolds = () => {
       const now = Date.now();
@@ -416,148 +367,252 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
       },
       ...items,
     ]);
-  const isRoomAvailable = (
-    roomId: string,
-    startAt: string,
-    endAt: string,
-    excludeId?: string,
-  ) => {
-    const room = rooms.find((item) => item.id === roomId);
-    if (!room?.rentable) return false;
-    const start = new Date(startAt).getTime() - room.bufferMinutes * 60_000;
-    const end = new Date(endAt).getTime() + room.bufferMinutes * 60_000;
-    const bookingConflict = bookings.some(
-      (item) =>
-        item.id !== excludeId &&
-        item.roomId === roomId &&
-        activeStatuses.includes(item.status) &&
-        start < new Date(item.endAt).getTime() + room.bufferMinutes * 60_000 &&
-        end > new Date(item.startAt).getTime() - room.bufferMinutes * 60_000,
-    );
-    const blackoutConflict = blackouts.some(
-      (item) =>
-        item.roomIds.includes(roomId) &&
-        start < new Date(item.endAt).getTime() &&
-        end > new Date(item.startAt).getTime(),
-    );
-    return !bookingConflict && !blackoutConflict;
-  };
   const value = useMemo<Store>(
     () => ({
-      campuses: campusList.length ? campusList : campuses,
-      buildings: buildingList.length ? buildingList : buildings,
+      campuses: campusList,
+      buildings: buildingList,
       rooms,
       bookings,
       blackouts,
-      addBooking: (data) => {
-        const now = new Date();
-        const booking: Booking = {
-          ...data,
-          id: `BR-${now.getFullYear().toString().slice(-2)}${String(now.getMonth() + 1).padStart(2, "0")}-${Math.floor(100 + Math.random() * 900)}`,
-          status: "pending_hold",
-          physicalStatus: "not_submitted",
-          holdExpiresAt: new Date(
-            now.getTime() + 48 * 60 * 60 * 1000,
-          ).toISOString(),
-          createdAt: now.toISOString(),
-        };
-        api.post(endpoints.bookings, {
-          room: Number(data.roomId), secondary_room: data.backupRoomId ? Number(data.backupRoomId) : null,
-          activity_name: data.activityName, description: data.description, participant_count: data.participants,
-          contact_person: data.contactPerson, contact_phone: data.contactPhone, contact_email: data.contactEmail,
-          start_time: data.startAt, end_time: data.endAt, equipment_request: Object.fromEntries(data.equipment.map((x) => [x, true])),
-        }).then(({ data: remote }) =>
-          api.post(`${endpoints.bookings}${remote.id}/submit/`).then(({ data: submitted }) =>
-            setBookings((items) => [mapBooking(submitted), ...items]),
-          ),
-        ).catch(() => undefined);
-        notify(
-          "admin",
-          "Có đơn mượn phòng mới",
-          `${booking.clubName} vừa gửi ${booking.id}.`,
-          booking.id,
-        );
-        return booking;
-      },
-      updateBooking: (id, patch) => {
-        const action = patch.status === "approved" ? "approve" : patch.status === "rejected" ? "reject" : patch.status === "needs_revision" ? "request-revision" : undefined;
-        if (patch.physicalStatus === "confirmed_received") {
-          api.post(`${endpoints.bookings}${id}/confirm-physical/`)
-            .then(({ data }) => setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item)))
-            .catch(() => undefined);
-          setBookings((items) => items.map((item) => item.id === id ? { ...item, physicalStatus: "confirmed_received" } : item));
+      documentTemplates,
+      addCampus: async (data) => {
+        try {
+          const { data: remote } = await api.post(endpoints.campuses, {
+            name: data.name,
+            code: data.code,
+            address: data.address ?? "",
+            active: data.active ?? true,
+          });
+          setCampusList((items) => [...items, mapCampus(remote)]);
+        } catch (error) {
+          showApiError(error, "Không thể thêm cơ sở");
+          throw error;
         }
-        if (action) api.post(`${endpoints.bookings}${id}/${action}/`, { reason: patch.note }).then(() => api.get(`${endpoints.bookings}${id}/`).then(({ data }) => setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item)))).catch(() => undefined);
-        else if (patch.roomId) api.post(`${endpoints.bookings}${id}/change-room/`, { new_room: Number(patch.roomId), reason: patch.note }).catch(() => undefined);
-        if (patch.status)
-          notify(
-            "club",
-            patch.status === "needs_revision"
-              ? "Đơn cần bổ sung"
-              : "Trạng thái đơn đã thay đổi",
-            `${id} đã chuyển sang ${patch.status}.`,
-            id,
-          );
       },
-      cancelBooking: (id) => {
-        api.post(`${endpoints.bookings}${id}/cancel/`).catch(() => undefined);
-        setBookings((items) =>
-          items.map((item) =>
-            item.id === id ? { ...item, status: "cancelled" } : item,
-          ),
-        );
-      },
-      uploadScan: (id, file) => {
-        const fileName = typeof file === "string" ? file : file.name;
-        if (file instanceof File) {
-          const form = new FormData();
-          form.append("file", file);
-          api.post(`${endpoints.bookings}${id}/upload-scan/`, form, { headers: { "Content-Type": "multipart/form-data" } }).catch(() => undefined);
+      updateCampus: async (id, patch) => {
+        try {
+          const { data } = await api.patch(`${endpoints.campuses}${id}/`, patch);
+          setCampusList((items) => items.map((item) => item.id === id ? mapCampus(data) : item));
+        } catch (error) {
+          showApiError(error, "Không thể cập nhật cơ sở");
+          throw error;
         }
-        setBookings((items) =>
-          items.map((item) =>
-            item.id === id
-              ? { ...item, physicalStatus: "submitted", scanName: fileName }
-              : item,
-          ),
-        );
-        notify(
-          "admin",
-          "CLB đã upload bản scan",
-          `${id} đã tải lên ${fileName}.`,
-          id,
-        );
       },
-      addBlackout: (data) => {
-        api.post(endpoints.blackouts, { scope_type: "room", room_ids: data.roomIds.map(Number), start_time: data.startAt, end_time: data.endAt, reason: data.reason, note: data.note }).then(({ data: remote }) => setBlackouts((items) => [{ ...data, id: String(remote.id) }, ...items])).catch(() => undefined);
+      addBuilding: async (data) => {
+        try {
+          const { data: remote } = await api.post(endpoints.buildings, {
+            campus: Number(data.campusId),
+            name: data.name,
+            floor_count: 1,
+            active: data.active ?? true,
+          });
+          setBuildingList((items) => [...items, mapBuilding(remote)]);
+        } catch (error) {
+          showApiError(error, "Không thể thêm tòa nhà");
+          throw error;
+        }
       },
-      addRoom: (data) =>
-        setRooms((items) => [
-          ...items,
-          { ...data, id: `${data.buildingId}-${Date.now()}` },
-        ]),
-      updateRoom: (id, patch) =>
-        setRooms((items) =>
-          items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
-        ),
-      isRoomAvailable,
+      updateBuilding: async (id, patch) => {
+        try {
+          const { data } = await api.patch(`${endpoints.buildings}${id}/`, {
+            campus: patch.campusId ? Number(patch.campusId) : undefined,
+            name: patch.name,
+            active: patch.active,
+          });
+          setBuildingList((items) => items.map((item) => item.id === id ? mapBuilding(data) : item));
+        } catch (error) {
+          showApiError(error, "Không thể cập nhật tòa nhà");
+          throw error;
+        }
+      },
+      addBooking: async (data) => {
+        try {
+          const { data: remote } = await api.post(endpoints.bookings, {
+            room: Number(data.roomId),
+            secondary_room: data.backupRoomId ? Number(data.backupRoomId) : null,
+            activity_name: data.activityName,
+            description: data.description,
+            participant_count: data.participants,
+            contact_person: data.contactPerson,
+            contact_phone: data.contactPhone,
+            contact_email: data.contactEmail,
+            start_time: data.startAt,
+            end_time: data.endAt,
+            equipment_request: Object.fromEntries(data.equipment.map((x) => [x, true])),
+          });
+          const { data: submitted } = await api.post(`${endpoints.bookings}${remote.id}/submit/`);
+          const booking = mapBooking(submitted);
+          setBookings((items) => [booking, ...items]);
+          return booking;
+        } catch (error) {
+          showApiError(error, "Không thể tạo đơn mượn phòng");
+          throw error;
+        }
+      },
+      updateBooking: async (id, patch) => {
+        const action = patch.status === "approved" ? "approve" : patch.status === "rejected" ? "reject" : patch.status === "needs_revision" ? "request-revision" : patch.status === "pending_hold" ? "submit" : undefined;
+        try {
+          if (patch.physicalStatus === "confirmed_received") {
+            const { data } = await api.post(`${endpoints.bookings}${id}/confirm-physical/`);
+            setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
+            return;
+          }
+          if (action) {
+            const { data } = await api.post(`${endpoints.bookings}${id}/${action}/`, { reason: patch.note });
+            setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
+            return;
+          }
+          if (patch.roomId && patch.status === "room_changed") {
+            const { data } = await api.post(`${endpoints.bookings}${id}/change-room/`, { new_room: Number(patch.roomId), reason: patch.note });
+            setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
+            return;
+          }
+          const { data } = await api.patch(`${endpoints.bookings}${id}/`, {
+            room: patch.roomId ? Number(patch.roomId) : undefined,
+            secondary_room: patch.backupRoomId ? Number(patch.backupRoomId) : undefined,
+            activity_name: patch.activityName,
+            description: patch.description,
+            participant_count: patch.participants,
+            contact_person: patch.contactPerson,
+            contact_phone: patch.contactPhone,
+            contact_email: patch.contactEmail,
+            start_time: patch.startAt,
+            end_time: patch.endAt,
+            notes: patch.note,
+            equipment_request: patch.equipment ? Object.fromEntries(patch.equipment.map((x) => [x, true])) : undefined,
+          });
+          setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
+        } catch (error) {
+          showApiError(error, "Không thể cập nhật đơn");
+          throw error;
+        }
+      },
+      cancelBooking: async (id, reason) => {
+        try {
+          const { data } = await api.post(`${endpoints.bookings}${id}/cancel/`, { reason });
+          setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
+        } catch (error) {
+          showApiError(error, "Không thể hủy đơn");
+          throw error;
+        }
+      },
+      uploadScan: async (id, file) => {
+        if (!(file instanceof File)) return;
+        const form = new FormData();
+        form.append("file", file);
+        try {
+          const { data } = await api.post(`${endpoints.bookings}${id}/upload-scan/`, form, { headers: { "Content-Type": "multipart/form-data" } });
+          setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
+        } catch (error) {
+          showApiError(error, "Không thể upload bản scan");
+          throw error;
+        }
+      },
+      addBlackout: async (data) => {
+        try {
+          const { data: remote } = await api.post(endpoints.blackouts, {
+            scope_type: "room",
+            room_ids: data.roomIds.map(Number),
+            start_time: data.startAt,
+            end_time: data.endAt,
+            reason: data.reason,
+          });
+          setBlackouts((items) => [{ ...data, id: String(remote.id) }, ...items]);
+        } catch (error) {
+          showApiError(error, "Không thể tạo blackout");
+          throw error;
+        }
+      },
+      addRoom: async (data) => {
+        try {
+          const { data: remote } = await api.post(endpoints.rooms, {
+            building: Number(data.buildingId),
+            name: data.name,
+            floor: 1,
+            capacity: data.capacity,
+            type: "meeting",
+            has_projector: data.equipment.includes("projector"),
+            has_microphone: data.equipment.includes("microphone"),
+            has_ac: data.equipment.includes("ac"),
+            has_whiteboard: data.equipment.includes("whiteboard"),
+            has_sound_system: data.equipment.includes("sound"),
+            rentable: data.rentable,
+            buffer_before_minutes: data.bufferMinutes,
+            buffer_after_minutes: data.bufferMinutes,
+            active: data.active ?? true,
+          });
+          setRooms((items) => [...items, mapRoom(remote)]);
+        } catch (error) {
+          showApiError(error, "Không thể thêm phòng");
+          throw error;
+        }
+      },
+      updateRoom: async (id, patch) => {
+        try {
+          const { data } = await api.patch(`${endpoints.rooms}${id}/`, {
+            name: patch.name,
+            capacity: patch.capacity,
+            rentable: patch.rentable,
+            active: patch.active,
+          });
+          setRooms((items) => items.map((item) => item.id === id ? mapRoom(data) : item));
+        } catch (error) {
+          showApiError(error, "Không thể cập nhật phòng");
+          throw error;
+        }
+      },
+      updateDocumentTemplate: async (templateType, patch) => {
+        try {
+          const current = documentTemplates.find((item) => item.templateType === templateType);
+          const { data } = await api.patch(`${endpoints.documentTemplates}${templateType}/`, {
+            name: patch.name ?? current?.name,
+            content: patch.content ?? current?.content,
+            active: patch.active ?? current?.active ?? true,
+          });
+          setDocumentTemplates((items) => items.map((item) => item.templateType === templateType ? mapDocumentTemplate(data) : item));
+        } catch (error) {
+          showApiError(error, "Không thể cập nhật mẫu đơn");
+          throw error;
+        }
+      },
       supportContact,
-      updateSupportContact: setSupportContact,
+      updateSupportContact: async (data) => {
+        try {
+          try {
+            await api.patch(`${endpoints.ruleConfigs}support_contact/`, { value: data });
+          } catch (error) {
+            if (!axios.isAxiosError(error) || error.response?.status !== 404) throw error;
+            await api.post(endpoints.ruleConfigs, {
+              key: "support_contact",
+              value: data,
+              description: "Cán bộ trực hỗ trợ CLB",
+            });
+          }
+          setSupportContact(data);
+        } catch (error) {
+          showApiError(error, "Không thể lưu cán bộ trực");
+          throw error;
+        }
+      },
       notifications,
-      markNotificationRead: (id) =>
-        setNotifications((items) =>
-          items.map((item) =>
-            item.id === id ? { ...item, read: true } : item,
-          ),
-        ),
-      markAllNotificationsRead: (audience) =>
-        setNotifications((items) =>
-          items.map((item) =>
-            item.audience === audience ? { ...item, read: true } : item,
-          ),
-        ),
+      markNotificationRead: async (id) => {
+        setNotifications((items) => items.map((item) => item.id === id ? { ...item, read: true } : item));
+        try {
+          await api.patch(`${endpoints.notifications}${id}/`, { is_read: true });
+        } catch (error) {
+          showApiError(error, "Không thể cập nhật thông báo");
+        }
+      },
+      markAllNotificationsRead: async (audience) => {
+        setNotifications((items) => items.map((item) => item.audience === audience ? { ...item, read: true } : item));
+        try {
+          await api.post(`${endpoints.notifications}mark-all-read/`);
+        } catch (error) {
+          showApiError(error, "Không thể cập nhật thông báo");
+        }
+      },
     }),
-    [campusList, buildingList, rooms, bookings, blackouts, supportContact, notifications],
+    [campusList, buildingList, rooms, bookings, blackouts, documentTemplates, supportContact, notifications],
   );
   return (
     <StoreContext.Provider value={value}>{children}</StoreContext.Provider>

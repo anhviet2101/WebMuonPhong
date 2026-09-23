@@ -2,12 +2,7 @@ from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
 
-from backend.bookings.models import (
-    Booking,
-    BookingStatus,
-    Notification,
-    PhysicalStatus,
-)
+from backend.bookings.models import Booking, BookingStatus, PhysicalStatus
 from backend.bookings.services.booking_service import transition_status
 
 
@@ -39,15 +34,6 @@ def auto_expire_unsubmitted_bookings():
                 continue
 
             transition_status(booking, BookingStatus.EXPIRED, booking.created_by)
-            Notification.objects.create(
-                user=booking.created_by,
-                type=Notification.NotificationType.EXPIRED,
-                message=(
-                    f"Đơn mượn phòng '{booking.activity_name}' đã hết hạn giữ chỗ "
-                    "do chưa nộp bản scan."
-                ),
-                related_booking=booking,
-            )
             expired_count += 1
 
     return expired_count

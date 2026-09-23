@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 import { useEffect, useMemo, useState } from "react";
 import {
   CalendarDays,
@@ -66,6 +66,7 @@ import {
   type ScheduleRow,
 } from "@/components/shared/document-export";
 import { useAuth } from "@/components/auth/auth-context";
+import { api, endpoints } from "@/lib/api";
 
 const equipment: { id: Equipment; label: string }[] = [
   { id: "projector", label: "Máy chiếu" },
@@ -117,59 +118,99 @@ function BookingWizard({
   const [end, setEnd] = useState(
     editing ? toLocalInput(editing.endAt) : defaultBookingTime(20),
   );
-  const [campus, setCampus] = useState("km");
+  const editingRoom = store.rooms.find((r) => r.id === editing?.roomId);
+  const editingBuilding = store.buildings.find((b) => b.id === editingRoom?.buildingId);
+  const [campus, setCampus] = useState(editingBuilding?.campusId ?? store.campuses[0]?.id ?? "");
   const campusBuildings = store.buildings.filter((b) => b.campusId === campus);
-  const [building, setBuilding] = useState(
-    editing
-      ? (store.rooms.find((r) => r.id === editing.roomId)?.buildingId ?? "km-a")
-      : "km-a",
+  const [building, setBuilding] = useState(editingRoom?.buildingId ?? campusBuildings[0]?.id ?? "");
+  const buildingRooms = store.rooms.filter((r) => r.buildingId === building);
+  const [remoteAvailableIds, setRemoteAvailableIds] = useState<string[] | null>(
+    null,
   );
-  const available = store.rooms.filter(
-    (r) =>
-      r.buildingId === building &&
-      store.isRoomAvailable(
-        r.id,
-        new Date(start).toISOString(),
-        new Date(end).toISOString(),
-        editing?.id,
-      ),
-  );
+  const [loadingRooms, setLoadingRooms] = useState(false);
+  const available = remoteAvailableIds === null
+    ? []
+    : buildingRooms.filter((r) => remoteAvailableIds.includes(r.id));
   const [room, setRoom] = useState(editing?.roomId ?? "");
   const [backup, setBackup] = useState(editing?.backupRoomId ?? "none");
   const [name, setName] = useState(editing?.activityName ?? "");
   const [description, setDescription] = useState(editing?.description ?? "");
   const [count, setCount] = useState(String(editing?.participants ?? 50));
   const [contactPerson, setContactPerson] = useState(
-    editing?.contactPerson ?? "Nguyễn Minh Anh",
+    editing?.contactPerson ?? (user?.organization?.representative_name || user?.fullName || ""),
   );
   const [contactPhone, setContactPhone] = useState(
-    editing?.contactPhone ?? "0912 345 678",
+    editing?.contactPhone ?? (user?.organization?.hotline || user?.phone || ""),
   );
   const [contactEmail, setContactEmail] = useState(
-    editing?.contactEmail ?? "minhanh.mec@university.edu.vn",
-  );
-  const [contactRole, setContactRole] = useState(
-    editing?.contactRole ?? "Chủ nhiệm CLB",
+    editing?.contactEmail ?? (user?.organization?.contact_email || user?.email || ""),
   );
   const [selected, setSelected] = useState<Equipment[]>(
-    editing?.equipment ?? ["projector"],
+    editing?.equipment ?? [],
   );
   useEffect(() => {
     if (editing || !user) return;
-    setContactPerson((current) => current === "Nguyễn Minh Anh" ? user.fullName : current);
-    setContactEmail((current) => current === "minhanh.mec@university.edu.vn" ? (user.organization?.contact_email ?? user.email) : current);
-    setContactPhone((current) => current === "0912 345 678" ? (user.organization?.hotline ?? user.phone ?? current) : current);
-    setContactRole((current) => current === "Chủ nhiệm CLB" ? (user.title ?? current) : current);
+    setContactPerson((current) => current || user.organization?.representative_name || user.fullName);
+    setContactEmail((current) => current || user.organization?.contact_email || user.email);
+    setContactPhone((current) => current || user.organization?.hotline || user.phone || "");
   }, [editing, user]);
   useEffect(() => {
+    if (editing) {
+      if (editingBuilding && !store.campuses.some((item) => item.id === campus)) {
+        setCampus(editingBuilding.campusId);
+        setBuilding(editingRoom?.buildingId ?? "");
+      }
+      return;
+    }
     if (!editing && store.campuses.length && !store.campuses.some((item) => item.id === campus)) {
       const firstCampus = store.campuses[0];
       setCampus(firstCampus.id);
       const firstBuilding = store.buildings.find((item) => item.campusId === firstCampus.id);
       setBuilding(firstBuilding?.id ?? "");
     }
-  }, [campus, editing, store.campuses, store.buildings]);
+  }, [campus, editing, editingRoom, editingBuilding, store.campuses, store.buildings]);
   const validTime = start && end && new Date(end) > new Date(start);
+  const loadAvailableRoomIds = async () => {
+    const { data } = await api.get(endpoints.availableRooms, {
+      params: {
+        start_time: new Date(start).toISOString(),
+        end_time: new Date(end).toISOString(),
+        building_id: building,
+        exclude_booking: editing?.id,
+      },
+    });
+    return (data.results ?? data).map((item: { id: number | string }) =>
+      String(item.id),
+    );
+  };
+  useEffect(() => {
+    if (!validTime || !building) {
+      setRemoteAvailableIds(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadingRooms(true);
+    loadAvailableRoomIds()
+      .then((ids) => {
+        if (cancelled) return;
+        setRemoteAvailableIds(ids);
+        if (room && !ids.includes(room)) setRoom("");
+        if (backup !== "none" && !ids.includes(backup)) setBackup("none");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRemoteAvailableIds([]);
+        setRoom("");
+        setBackup("none");
+        toast.error("Không thể kiểm tra phòng khả dụng theo thời gian đã chọn");
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingRooms(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [backup, building, editing?.id, end, room, start, validTime]);
   const resetBuilding = (value: string) => {
     setCampus(value);
     const first = store.buildings.find((b) => b.campusId === value);
@@ -177,21 +218,42 @@ function BookingWizard({
     setRoom("");
     setBackup("none");
   };
-  const submit = () => {
+  const submit = async () => {
     if (!name.trim() || !room)
       return toast.error("Vui lòng điền tên hoạt động và chọn phòng");
+    try {
+      const freshIds = await loadAvailableRoomIds();
+      setRemoteAvailableIds(freshIds);
+      if (
+        !freshIds.includes(room) ||
+        (backup !== "none" && !freshIds.includes(backup))
+      ) {
+        setRoom(freshIds.includes(room) ? room : "");
+        setBackup(
+          backup !== "none" && freshIds.includes(backup) ? backup : "none",
+        );
+        setStep(2);
+        return toast.error(
+          "Phòng đã có đơn khác giữ trong khung giờ này. Vui lòng chọn phòng khác.",
+        );
+      }
+    } catch {
+      setStep(2);
+      return toast.error(
+        "Không thể kiểm tra phòng khả dụng. Vui lòng thử lại trước khi gửi đơn.",
+      );
+    }
     if (
       !contactPerson.trim() ||
       !contactPhone.trim() ||
-      !contactEmail.trim() ||
-      !contactRole.trim()
+      !contactEmail.trim()
     )
       return toast.error("Vui lòng điền đầy đủ thông tin người đại diện");
     if (!/^\S+@\S+\.\S+$/.test(contactEmail))
       return toast.error("Email người đại diện chưa hợp lệ");
     const data = {
-      clubCode: "MEC",
-      clubName: "CLB Truyền thông & Sự kiện",
+      clubCode: user?.organization?.abbreviation ?? "",
+      clubName: user?.organization?.name ?? user?.organizationName ?? "",
       activityName: name,
       description,
       roomId: room,
@@ -202,21 +264,23 @@ function BookingWizard({
       contactPerson: contactPerson.trim(),
       contactPhone: contactPhone.trim(),
       contactEmail: contactEmail.trim(),
-      contactRole: contactRole.trim(),
       equipment: selected,
     };
-    if (editing) {
-      store.updateBooking(editing.id, {
-        ...data,
-        status: "pending_hold",
-        holdExpiresAt: new Date(Date.now() + 48 * 3600000).toISOString(),
-      });
-      toast.success("Đã cập nhật và gửi lại đơn");
-    } else {
-      const b = store.addBooking(data);
-      toast.success(`${b.id} đã được giữ chỗ trong 48 giờ`);
+    try {
+      if (editing) {
+        await store.updateBooking(editing.id, data);
+        if (editing.status === "needs_revision" || editing.status === "draft") {
+          await store.updateBooking(editing.id, { status: "pending_hold" });
+        }
+        toast.success("Đã cập nhật đơn");
+      } else {
+        const b = await store.addBooking(data);
+        toast.success(`${b.id} đã được giữ chỗ trong 48 giờ`);
+      }
+      close();
+    } catch {
+      // The store reports the API error and keeps the form open for correction.
     }
-    close();
   };
   return (
     <Dialog open={open} onOpenChange={(v) => !v && close()}>
@@ -306,9 +370,19 @@ function BookingWizard({
                   <SelectValue placeholder="Chọn phòng trống" />
                 </SelectTrigger>
                 <SelectContent>
+                  {loadingRooms && (
+                    <SelectItem value="loading" disabled>
+                      Đang kiểm tra phòng trống...
+                    </SelectItem>
+                  )}
+                  {!loadingRooms && available.length === 0 && (
+                    <SelectItem value="empty" disabled>
+                      Không có phòng trống trong khung giờ này
+                    </SelectItem>
+                  )}
                   {available.map((r) => (
                     <SelectItem key={r.id} value={r.id}>
-                      {r.name} · {r.capacity} người
+                      {r.name} · {r.capacity === null ? "Chưa cập nhật sức chứa" : `${r.capacity} người`}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -322,6 +396,11 @@ function BookingWizard({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Không chọn</SelectItem>
+                  {loadingRooms && (
+                    <SelectItem value="loading" disabled>
+                      Đang kiểm tra phòng trống...
+                    </SelectItem>
+                  )}
                   {available
                     .filter((r) => r.id !== room)
                     .map((r) => (
@@ -332,6 +411,12 @@ function BookingWizard({
                 </SelectContent>
               </Select>
             </div>
+            {!loadingRooms && available.length === 0 && (
+              <p className="text-sm text-amber-700 sm:col-span-2">
+                Không có phòng khả dụng trong khung giờ đã chọn. Vui lòng đổi
+                thời gian hoặc tòa nhà.
+              </p>
+            )}
           </div>
         )}
         {step === 3 && (
@@ -361,13 +446,6 @@ function BookingWizard({
                 <Input
                   value={contactPerson}
                   onChange={(e) => setContactPerson(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label>Chức vụ trong CLB *</Label>
-                <Input
-                  value={contactRole}
-                  onChange={(e) => setContactRole(e.target.value)}
                 />
               </div>
               <div className="grid gap-2">
@@ -446,10 +524,10 @@ function Upload({
 }) {
   const { uploadScan } = usePrototypeStore();
   const [file, setFile] = useState<File | null>(null);
-  const submit = () => {
+  const submit = async () => {
     if (!booking || !file) return toast.error("Chọn file JPG, PNG hoặc PDF");
     if (file.size > 10 * 1024 * 1024) return toast.error("File vượt quá 10MB");
-    uploadScan(booking.id, file);
+    await uploadScan(booking.id, file);
     toast.success("Đã upload scan và cập nhật trạng thái");
     close();
   };
@@ -457,7 +535,7 @@ function Upload({
     <Dialog open={!!booking} onOpenChange={(v) => !v && close()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Upload ảnh scan</DialogTitle>
+          <DialogTitle>Upload scan</DialogTitle>
           <DialogDescription>JPG, PNG hoặc PDF; tối đa 10MB.</DialogDescription>
         </DialogHeader>
         <label className="grid cursor-pointer place-items-center gap-2 rounded-lg border-2 border-dashed p-10">
@@ -481,6 +559,96 @@ function Upload({
   );
 }
 
+function BookingDetailDialog({
+  booking,
+  close,
+}: {
+  booking: Booking | null;
+  close: () => void;
+}) {
+  const store = usePrototypeStore();
+  const room = booking
+    ? store.rooms.find((item) => item.id === booking.roomId)
+    : undefined;
+  const building = room
+    ? store.buildings.find((item) => item.id === room.buildingId)
+    : undefined;
+  const campus = building
+    ? store.campuses.find((item) => item.id === building.campusId)
+    : undefined;
+  const equipmentLabels = booking?.equipment
+    .map((item) => equipment.find((option) => option.id === item)?.label ?? item)
+    .join(", ");
+
+  return (
+    <Dialog open={!!booking} onOpenChange={(open) => !open && close()}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{booking?.activityName ?? "Thông tin đơn mượn"}</DialogTitle>
+          <DialogDescription>
+            {booking ? `Mã đơn ${booking.id}` : "Chi tiết đơn đăng ký mượn phòng"}
+          </DialogDescription>
+        </DialogHeader>
+        {booking && (
+          <div className="grid gap-4 text-sm">
+            <div className="flex flex-wrap gap-2">
+              <BookingStatusBadge status={booking.status} />
+              <PhysicalStatusBadge status={booking.physicalStatus} />
+            </div>
+            <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-2">
+              <div>
+                <p className="text-xs font-medium uppercase text-slate-500">Phòng</p>
+                <p className="font-medium">
+                  {room?.name ?? booking.roomId}
+                  {building ? ` · ${building.name}` : ""}
+                </p>
+                {campus && <p className="text-xs text-slate-500">{campus.name}</p>}
+              </div>
+              <div>
+                <p className="text-xs font-medium uppercase text-slate-500">Thời gian</p>
+                <p className="font-medium">{fmt(booking.startAt)}</p>
+                <p className="text-xs text-slate-500">Kết thúc: {fmt(booking.endAt)}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium uppercase text-slate-500">Số lượng</p>
+                <p className="font-medium">{booking.participants} người</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium uppercase text-slate-500">Người phụ trách</p>
+                <p className="font-medium">{booking.contactPerson}</p>
+                <p className="text-xs text-slate-500">
+                  {booking.contactPhone} · {booking.contactEmail}
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <div>
+                <p className="text-xs font-medium uppercase text-slate-500">Mô tả hoạt động</p>
+                <p className="mt-1 whitespace-pre-wrap text-slate-700">
+                  {booking.description || "Chưa có mô tả"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs font-medium uppercase text-slate-500">Thiết bị</p>
+                <p className="mt-1 text-slate-700">{equipmentLabels || "Không yêu cầu"}</p>
+              </div>
+              {booking.note && (
+                <div>
+                  <p className="text-xs font-medium uppercase text-slate-500">Ghi chú</p>
+                  <p className="mt-1 whitespace-pre-wrap text-slate-700">{booking.note}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        <DialogFooter>
+          <Button onClick={close}>Đóng</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function weekBounds(value: string) {
   const selected = new Date(`${value}T00:00:00`);
   const mondayOffset = (selected.getDay() + 6) % 7;
@@ -492,10 +660,14 @@ function weekBounds(value: string) {
   return { from, to };
 }
 
+const localDateValue = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
 function MauAPreview({ open, close }: { open: boolean; close: () => void }) {
   const store = usePrototypeStore();
+  const template = store.documentTemplates.find((item) => item.templateType === "mau_a")?.content;
   const [weekDate, setWeekDate] = useState(
-    new Date().toISOString().slice(0, 10),
+    localDateValue(new Date()),
   );
   const { from, to } = weekBounds(weekDate);
   const rows = useMemo<ScheduleRow[]>(
@@ -605,7 +777,7 @@ function MauAPreview({ open, close }: { open: boolean; close: () => void }) {
           <Button
             variant="outline"
             disabled={!rows.length}
-            onClick={() => printSchedule(rows)}
+            onClick={() => printSchedule(rows, template, { redDynamicText: true })}
           >
             <Printer />
             In đơn
@@ -613,7 +785,7 @@ function MauAPreview({ open, close }: { open: boolean; close: () => void }) {
           <Button
             disabled={!rows.length}
             onClick={async () => {
-              await exportScheduleDocx(rows, `Mau-A-${weekDate}.docx`);
+              await exportScheduleDocx(rows, `Mau-A-${weekDate}.docx`, template, { redDynamicText: true });
               toast.success("Đã tạo Mẫu A theo đúng lịch tuần được chọn");
             }}
           >
@@ -628,6 +800,7 @@ function MauAPreview({ open, close }: { open: boolean; close: () => void }) {
 
 export function ClubDashboard() {
   const store = usePrototypeStore();
+  const { user } = useAuth();
   // The API applies organization ownership filtering for club users. Numeric
   // organization IDs are intentionally kept in clubCode, so do not filter by
   // the prototype's former "MEC" code.
@@ -647,18 +820,19 @@ export function ClubDashboard() {
     [editing, setEditing] = useState<Booking | null>(null),
     [upload, setUpload] = useState<Booking | null>(null),
     [cancel, setCancel] = useState<Booking | null>(null),
+    [detail, setDetail] = useState<Booking | null>(null),
     [mauAOpen, setMauAOpen] = useState(false);
   const roomName = (id: string) =>
     store.rooms.find((r) => r.id === id)?.name ?? id;
   return (
     <main className="min-h-screen bg-slate-50">
       <DashboardHeader
-        badge="MEC"
+        badge={user?.organization?.abbreviation || user?.organizationName || "CLB"}
         eyebrow="Dashboard CLB"
-        title="CLB Truyền thông & Sự kiện"
-        userName="Nguyễn Minh Anh"
-        userRole="Đại diện CLB"
-        userInitials="MA"
+        title={user?.organization?.name || user?.organizationName || "Câu lạc bộ"}
+        userName={user?.fullName || user?.username || "Đại diện CLB"}
+        userRole={user?.title || "Đại diện CLB"}
+        userInitials={(user?.fullName || user?.username || "CLB").split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}
         notificationAudience="club"
         primaryAction={
           <Button onClick={() => setWizard(true)}>
@@ -709,9 +883,11 @@ export function ClubDashboard() {
                   Cán bộ trực VP Đoàn hỗ trợ
                 </p>
                 <h2 className="font-semibold">
-                  {store.supportContact.name} · {store.supportContact.role}
+                  {store.supportContact.name
+                    ? `${store.supportContact.name} · ${store.supportContact.role}`
+                    : "VP Đoàn chưa cập nhật cán bộ trực"}
                 </h2>
-                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-600">
+                {store.supportContact.name && <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-600">
                   <span className="inline-flex items-center gap-1">
                     <Phone className="size-4" />
                     {store.supportContact.phone}
@@ -724,7 +900,7 @@ export function ClubDashboard() {
                     <Clock3 className="size-4" />
                     {store.supportContact.shift}
                   </span>
-                </div>
+                </div>}
               </div>
             </div>
             <Button
@@ -782,11 +958,21 @@ export function ClubDashboard() {
                           </TableCell>
                         </TableRow>
                       )}
-                      {(list as Booking[]).map((b) => (
+                      {(list as Booking[]).map((b) => {
+                        const canEdit =
+                          ["draft", "pending_hold", "needs_revision"].includes(b.status) &&
+                          b.physicalStatus !== "confirmed_received";
+                        return (
                         <TableRow key={b.id}>
                           <TableCell className="font-medium">{b.id}</TableCell>
                           <TableCell>
-                            <b>{b.activityName}</b>
+                            <button
+                              type="button"
+                              className="text-left font-semibold hover:text-blue-700 hover:underline"
+                              onClick={() => setDetail(b)}
+                            >
+                              {b.activityName}
+                            </button>
                             <p className="text-xs text-slate-500">
                               {b.participants} người
                             </p>
@@ -834,9 +1020,7 @@ export function ClubDashboard() {
                                       <UploadCloud />
                                       Upload scan
                                     </DropdownMenuItem>
-                                    {["draft", "needs_revision"].includes(
-                                      b.status,
-                                    ) && (
+                                    {canEdit && (
                                       <DropdownMenuItem
                                         onClick={() => {
                                           setEditing(b);
@@ -858,7 +1042,8 @@ export function ClubDashboard() {
                             </div>
                           </TableCell>
                         </TableRow>
-                      ))}
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </CardContent>
@@ -888,6 +1073,7 @@ export function ClubDashboard() {
       {mauAOpen && (
         <MauAPreview open={mauAOpen} close={() => setMauAOpen(false)} />
       )}
+      <BookingDetailDialog booking={detail} close={() => setDetail(null)} />
       <Dialog open={!!cancel} onOpenChange={(v) => !v && setCancel(null)}>
         <DialogContent>
           <DialogHeader>
@@ -902,9 +1088,9 @@ export function ClubDashboard() {
             </Button>
             <Button
               variant="destructive"
-              onClick={() => {
+              onClick={async () => {
                 if (cancel) {
-                  store.cancelBooking(cancel.id);
+                  await store.cancelBooking(cancel.id);
                   toast.success("Đã hủy đơn và trả phòng");
                 }
                 setCancel(null);

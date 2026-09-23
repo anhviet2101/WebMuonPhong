@@ -27,6 +27,13 @@ class HasPermission(BasePermission):
         return user_has_permission(user, self.permission_key)
 
 
+class IsAdminRole(BasePermission):
+    message = "Chỉ tài khoản quản trị được thực hiện thao tác này."
+
+    def has_permission(self, request, view):
+        return is_admin(request.user)
+
+
 class BookingObjectPermission(BasePermission):
     message = "Bạn không có quyền truy cập booking này."
 

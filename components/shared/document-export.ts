@@ -11,7 +11,14 @@ import {
   VerticalAlign,
   WidthType,
 } from "docx";
-import type { Booking, Building, Campus, Room } from "./prototype-store";
+import type {
+  Booking,
+  Building,
+  Campus,
+  DocumentTemplateContent,
+  Room,
+} from "./prototype-store";
+import { defaultDocumentTemplateContent } from "./prototype-store";
 
 export type ScheduleRow = {
   booking: Booking;
@@ -19,6 +26,7 @@ export type ScheduleRow = {
   building?: Building;
   campus?: Campus;
 };
+
 const weekday = [
   "Chủ Nhật",
   "Thứ Hai",
@@ -28,19 +36,14 @@ const weekday = [
   "Thứ Sáu",
   "Thứ Bảy",
 ];
-const timeText = (row: ScheduleRow) => {
-  const start = new Date(row.booking.startAt),
-    end = new Date(row.booking.endAt);
-  const hm = (d: Date) =>
-    `${String(d.getHours()).padStart(2, "0")}h${String(d.getMinutes()).padStart(2, "0")}`;
-  return `${hm(start)} - ${hm(end)}, ${weekday[start.getDay()]}, Ngày ${String(start.getDate()).padStart(2, "0")}/${String(start.getMonth() + 1).padStart(2, "0")}/${start.getFullYear()}`;
-};
+
 const borders = {
   top: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
   bottom: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
   left: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
   right: { style: BorderStyle.SINGLE, size: 4, color: "000000" },
 };
+
 const noBorders = {
   top: { style: BorderStyle.NONE },
   bottom: { style: BorderStyle.NONE },
@@ -49,7 +52,37 @@ const noBorders = {
   insideHorizontal: { style: BorderStyle.NONE },
   insideVertical: { style: BorderStyle.NONE },
 };
-const cell = (text: string, width: number, bold = false) =>
+
+const hm = (date: Date) =>
+  `${String(date.getHours()).padStart(2, "0")}h${String(date.getMinutes()).padStart(2, "0")}`;
+
+const timeText = (row: ScheduleRow) => {
+  const start = new Date(row.booking.startAt);
+  const end = new Date(row.booking.endAt);
+  return `${hm(start)} - ${hm(end)}, ${weekday[start.getDay()]}, ngày ${String(start.getDate()).padStart(2, "0")}/${String(start.getMonth() + 1).padStart(2, "0")}/${start.getFullYear()}`;
+};
+
+const lineRuns = (text: string, bold = false, size = 22) =>
+  text.split("\n").flatMap((line, index) => [
+    ...(index > 0 ? [new TextRun({ text: "", break: 1 })] : []),
+    new TextRun({ text: line, bold, font: "Times New Roman", size }),
+  ]);
+
+const para = (
+  text: string,
+  {
+    alignment = AlignmentType.LEFT,
+    bold = false,
+    size = 24,
+  }: { alignment?: (typeof AlignmentType)[keyof typeof AlignmentType]; bold?: boolean; size?: number } = {},
+) =>
+  new Paragraph({
+    alignment,
+    spacing: { before: 80, after: 80 },
+    children: lineRuns(text, bold, size),
+  });
+
+const cell = (text: string, width: number, bold = false, color = "000000") =>
   new TableCell({
     width: { size: width, type: WidthType.DXA },
     borders,
@@ -58,16 +91,23 @@ const cell = (text: string, width: number, bold = false) =>
       new Paragraph({
         alignment: AlignmentType.CENTER,
         spacing: { before: 60, after: 60 },
-        children: [
-          new TextRun({ text, bold, font: "Times New Roman", size: 22 }),
-        ],
+        children: [new TextRun({ text, bold, font: "Times New Roman", size: 22, color })],
       }),
     ],
   });
+
+const templateOrDefault = (template?: DocumentTemplateContent) => ({
+  ...defaultDocumentTemplateContent,
+  ...(template ?? {}),
+});
+
 export async function exportScheduleDocx(
   rows: ScheduleRow[],
   fileName: string,
+  rawTemplate?: DocumentTemplateContent,
+  options: { redDynamicText?: boolean } = {},
 ) {
+  const template = templateOrDefault(rawTemplate);
   const now = new Date();
   const header = new Table({
     width: { size: 9360, type: WidthType.DXA },
@@ -78,67 +118,17 @@ export async function exportScheduleDocx(
         children: [
           new TableCell({
             width: { size: 5000, type: WidthType.DXA },
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({
-                    text: "ĐOÀN ĐẠI HỌC QUỐC GIA HÀ NỘI",
-                    bold: true,
-                    font: "Times New Roman",
-                    size: 22,
-                  }),
-                ],
-              }),
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({
-                    text: "BCH TRƯỜNG ĐẠI HỌC CÔNG NGHỆ",
-                    bold: true,
-                    font: "Times New Roman",
-                    size: 22,
-                  }),
-                ],
-              }),
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({
-                    text: "***",
-                    bold: true,
-                    font: "Times New Roman",
-                    size: 22,
-                  }),
-                ],
-              }),
-            ],
+            borders: noBorders,
+            children: [para(template.leftHeader, { alignment: AlignmentType.CENTER, bold: true, size: 22 })],
           }),
           new TableCell({
             width: { size: 4360, type: WidthType.DXA },
+            borders: noBorders,
             children: [
-              new Paragraph({
+              para(template.rightHeader, { alignment: AlignmentType.CENTER, bold: true, size: 22 }),
+              para(`Hà Nội, ngày ${String(now.getDate()).padStart(2, "0")} tháng ${String(now.getMonth() + 1).padStart(2, "0")} năm ${now.getFullYear()}`, {
                 alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({
-                    text: "ĐOÀN TNCS HỒ CHÍ MINH",
-                    bold: true,
-                    font: "Times New Roman",
-                    size: 22,
-                  }),
-                ],
-              }),
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                spacing: { before: 200 },
-                children: [
-                  new TextRun({
-                    text: `Hà Nội, ngày ${now.getDate()} tháng ${now.getMonth() + 1} năm ${now.getFullYear()}`,
-                    italics: true,
-                    font: "Times New Roman",
-                    size: 22,
-                  }),
-                ],
+                size: 22,
               }),
             ],
           }),
@@ -146,6 +136,7 @@ export async function exportScheduleDocx(
       }),
     ],
   });
+
   const tableRows = [
     new TableRow({
       tableHeader: true,
@@ -161,18 +152,16 @@ export async function exportScheduleDocx(
       (row, index) =>
         new TableRow({
           children: [
-            cell(String(index + 1), 600),
-            cell(timeText(row), 3100),
-            cell(
-              `${row.room?.name ?? ""} - ${row.building?.name ?? row.campus?.name ?? ""}`,
-              1800,
-            ),
-            cell(row.booking.clubName, 2500),
-            cell(row.booking.note ?? "", 1360),
+            cell(String(index + 1), 600, false, options.redDynamicText ? "C00000" : "000000"),
+            cell(timeText(row), 3100, false, options.redDynamicText ? "C00000" : "000000"),
+            cell(`${row.room?.name ?? ""} - ${row.building?.name ?? row.campus?.name ?? ""}`, 1800, false, options.redDynamicText ? "C00000" : "000000"),
+            cell(row.booking.clubName, 2500, false, options.redDynamicText ? "C00000" : "000000"),
+            cell(row.booking.note ?? "", 1360, false, options.redDynamicText ? "C00000" : "000000"),
           ],
         }),
     ),
   ];
+
   const signature = new Table({
     width: { size: 9360, type: WidthType.DXA },
     columnWidths: [4680, 4680],
@@ -183,126 +172,35 @@ export async function exportScheduleDocx(
           new TableCell({
             width: { size: 4680, type: WidthType.DXA },
             borders: noBorders,
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({
-                    text: "Ý KIẾN PHÒNG HCQT & TCCB",
-                    bold: true,
-                    font: "Times New Roman",
-                    size: 22,
-                  }),
-                ],
-              }),
-              new Paragraph("\n\n\n"),
-            ],
+            children: [para(template.leftSignature, { alignment: AlignmentType.CENTER, bold: true, size: 22 }), new Paragraph("\n\n\n")],
           }),
           new TableCell({
             width: { size: 4680, type: WidthType.DXA },
             borders: noBorders,
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({
-                    text: "TM. BCH ĐOÀN TRƯỜNG",
-                    bold: true,
-                    font: "Times New Roman",
-                    size: 22,
-                  }),
-                ],
-              }),
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [
-                  new TextRun({
-                    text: "UV BAN THƯỜNG VỤ",
-                    bold: true,
-                    font: "Times New Roman",
-                    size: 22,
-                  }),
-                ],
-              }),
-              new Paragraph("\n\n\n"),
-            ],
+            children: [para(template.rightSignature, { alignment: AlignmentType.CENTER, bold: true, size: 22 }), new Paragraph("\n\n\n")],
           }),
         ],
       }),
     ],
   });
+
   const doc = new Document({
-    styles: {
-      default: { document: { run: { font: "Times New Roman", size: 26 } } },
-    },
+    styles: { default: { document: { run: { font: "Times New Roman", size: 26 } } } },
     sections: [
       {
-        properties: {
-          page: {
-            margin: { top: 1134, right: 1134, bottom: 1134, left: 1134 },
-          },
-        },
+        properties: { page: { margin: { top: 1134, right: 1134, bottom: 1134, left: 1134 } } },
         children: [
           header,
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { before: 240, after: 160 },
-            children: [
-              new TextRun({
-                text: "ĐƠN ĐỀ NGHỊ",
-                bold: true,
-                font: "Times New Roman",
-                size: 32,
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { after: 240 },
-            children: [
-              new TextRun({
-                text: "Kính gửi: Phòng Hành chính Quản trị và Tổ chức Cán bộ",
-                bold: true,
-                font: "Times New Roman",
-                size: 26,
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.JUSTIFIED,
-            indent: { firstLine: 720 },
-            spacing: { after: 180, line: 360 },
-            children: [
-              new TextRun(
-                "Thực hiện nhiệm vụ kế hoạch năm học, các đơn vị trực thuộc ĐTN - HSV tiến hành tổ chức sinh hoạt. Để hoạt động diễn ra đúng kế hoạch và thành công tốt đẹp, kính đề nghị Quý phòng xem xét và hỗ trợ. Cụ thể theo danh sách:",
-              ),
-            ],
-          }),
+          para(template.title, { alignment: AlignmentType.CENTER, bold: true, size: 32 }),
+          para(template.recipient, { alignment: AlignmentType.CENTER, bold: true, size: 26 }),
+          para(template.intro, { alignment: AlignmentType.JUSTIFIED, size: 24 }),
           new Table({
             width: { size: 9360, type: WidthType.DXA },
             columnWidths: [600, 3100, 1800, 2500, 1360],
             rows: tableRows,
           }),
-          new Paragraph({
-            alignment: AlignmentType.JUSTIFIED,
-            indent: { firstLine: 720 },
-            spacing: { before: 180, after: 120 },
-            children: [
-              new TextRun(
-                "Các đơn vị trực thuộc ĐTN - HSV cam kết sau khi sử dụng phòng học xong sẽ trả đúng nguyên trạng ban đầu của phòng học.",
-              ),
-            ],
-          }),
-          new Paragraph({
-            indent: { firstLine: 720 },
-            children: [
-              new TextRun("Kính mong nhận được sự giúp đỡ của Quý Phòng."),
-            ],
-          }),
-          new Paragraph({
-            indent: { firstLine: 720 },
-            children: [new TextRun("Xin trân trọng cảm ơn!")],
-          }),
+          para(template.commitment, { alignment: AlignmentType.JUSTIFIED, size: 24 }),
+          para(template.closing, { alignment: AlignmentType.JUSTIFIED, size: 24 }),
           signature,
         ],
       },
@@ -314,20 +212,30 @@ export async function exportScheduleDocx(
   a.href = url;
   a.download = fileName;
   a.click();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
-export function printSchedule(rows: ScheduleRow[]) {
+
+export function printSchedule(
+  rows: ScheduleRow[],
+  rawTemplate?: DocumentTemplateContent,
+  options: { redDynamicText?: boolean } = {},
+) {
+  const template = templateOrDefault(rawTemplate);
+  const now = new Date();
+  const issueDate = `Hà Nội, ngày ${String(now.getDate()).padStart(2, "0")} tháng ${String(now.getMonth() + 1).padStart(2, "0")} năm ${now.getFullYear()}`;
+  const escape = (value: string) =>
+    value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[char] ?? char);
   const body = rows
     .map(
       (row, i) =>
-        `<tr><td>${i + 1}</td><td>${timeText(row)}</td><td>${row.room?.name ?? ""} - ${row.building?.name ?? ""}</td><td>${row.booking.clubName}</td><td>${row.booking.note ?? ""}</td></tr>`,
+        `<tr class="${options.redDynamicText ? "dynamic" : ""}"><td>${i + 1}</td><td>${escape(timeText(row))}</td><td>${escape(`${row.room?.name ?? ""} - ${row.building?.name ?? ""}`)}</td><td>${escape(row.booking.clubName)}</td><td>${escape(row.booking.note ?? "")}</td></tr>`,
     )
     .join("");
-  const w = window.open("", "_blank");
-  if (!w) return;
-  w.document.write(
-    `<html><head><title>Đơn đề nghị</title><style>body{font:14px 'Times New Roman';margin:35px}h1{text-align:center;font-size:20px}table{width:100%;border-collapse:collapse}td,th{border:1px solid;padding:8px;text-align:center}.heads{display:flex;justify-content:space-between;text-align:center;font-weight:bold}.sign{display:flex;justify-content:space-between;text-align:center;font-weight:bold;margin-top:24px}</style></head><body><div class="heads"><div>ĐOÀN ĐẠI HỌC QUỐC GIA HÀ NỘI<br>BCH TRƯỜNG ĐẠI HỌC CÔNG NGHỆ<br>***</div><div>ĐOÀN TNCS HỒ CHÍ MINH</div></div><h1>ĐƠN ĐỀ NGHỊ</h1><p style="text-align:center"><b>Kính gửi: Phòng Hành chính Quản trị và Tổ chức Cán bộ</b></p><p>Thực hiện nhiệm vụ kế hoạch năm học, các đơn vị trực thuộc ĐTN - HSV tiến hành tổ chức sinh hoạt. Kính đề nghị Quý phòng xem xét và hỗ trợ:</p><table><tr><th>STT</th><th>Thời gian</th><th>Địa điểm</th><th>Đơn vị</th><th>Ghi chú</th></tr>${body}</table><p>Các đơn vị cam kết hoàn trả nguyên trạng cơ sở vật chất sau khi sử dụng.</p><div class="sign"><div>Ý KIẾN<br>PHÒNG HCQT & TCCB</div><div>TM. BCH ĐOÀN TRƯỜNG<br>UV BAN THƯỜNG VỤ</div></div></body></html>`,
+  const win = window.open("", "_blank");
+  if (!win) return;
+  win.document.write(
+    `<html><head><title>${escape(template.title)}</title><style>body{font:14px 'Times New Roman';margin:35px}h1{text-align:center;font-size:20px;white-space:pre-line}.heads,.sign{display:flex;justify-content:space-between;text-align:center;font-weight:bold;white-space:pre-line}table{width:100%;border-collapse:collapse}td,th{border:1px solid;padding:8px;text-align:center}.dynamic td{color:#c00000}</style></head><body><div class="heads"><div>${escape(template.leftHeader)}</div><div>${escape(template.rightHeader)}<div>${escape(issueDate)}</div></div></div><h1>${escape(template.title)}</h1><p style="text-align:center"><b>${escape(template.recipient)}</b></p><p>${escape(template.intro)}</p><table><tr><th>STT</th><th>Thời gian</th><th>Địa điểm</th><th>Đơn vị</th><th>Ghi chú</th></tr>${body}</table><p>${escape(template.commitment)}</p><p>${escape(template.closing)}</p><div class="sign"><div>${escape(template.leftSignature)}</div><div>${escape(template.rightSignature)}</div></div></body></html>`,
   );
-  w.document.close();
-  w.print();
+  win.document.close();
+  win.print();
 }

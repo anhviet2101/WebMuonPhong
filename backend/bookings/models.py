@@ -162,7 +162,9 @@ class Room(models.Model):
     building = models.ForeignKey(Building, on_delete=models.PROTECT, related_name="rooms")
     name = models.CharField(max_length=255)
     floor = models.PositiveSmallIntegerField(validators=[MinValueValidator(1)])
-    capacity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    capacity = models.PositiveIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(1)]
+    )
     type = models.CharField(max_length=50)
     has_projector = models.BooleanField(default=False)
     has_microphone = models.BooleanField(default=False)
@@ -260,6 +262,7 @@ class Booking(models.Model):
                     status__in=[
                         BookingStatus.PENDING_HOLD,
                         BookingStatus.APPROVED,
+                        BookingStatus.ROOM_CHANGED,
                     ]
                 ),
             ),
@@ -380,6 +383,35 @@ class BusinessRuleConfig(models.Model):
 
     def __str__(self):
         return self.key
+
+
+class DocumentTemplate(models.Model):
+    class TemplateType(models.TextChoices):
+        MAU_A = "mau_a", "Mẫu A"
+        MAU_B = "mau_b", "Mẫu B"
+
+    template_type = models.CharField(
+        max_length=20,
+        choices=TemplateType.choices,
+        unique=True,
+    )
+    name = models.CharField(max_length=255)
+    content = models.JSONField(default=dict, blank=True)
+    active = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updated_document_templates",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["template_type"]
+
+    def __str__(self):
+        return self.name
 
 
 class Notification(models.Model):
