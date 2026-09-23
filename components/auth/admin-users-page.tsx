@@ -182,10 +182,12 @@ export function AdminUsersPage() {
     <div className="mx-auto max-w-6xl space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div><p className="text-sm text-blue-600">QUẢN TRỊ HỆ THỐNG</p><h1 className="text-2xl font-semibold">Quản lý CLB và tài khoản</h1></div>
-        <div className="flex gap-2">
+        <nav aria-label="Điều hướng quản trị" className="flex flex-wrap gap-2">
+          <Button asChild variant="outline"><a href="/admin-doan">Dashboard</a></Button>
+          <Button asChild variant="outline"><a href="/calendar">Lịch phòng</a></Button>
           <Button variant="outline" onClick={() => setShowArchived((value) => !value)}>{showArchived ? "Xem đang dùng" : "Xem đã xóa"}</Button>
           <Button variant="outline" onClick={logout}>Đăng xuất</Button>
-        </div>
+        </nav>
       </div>
 
       {!showArchived && <>

@@ -845,6 +845,11 @@ export function AdminDashboard() {
         userRole="YU_ADMIN"
         userInitials="VP"
         notificationAudience="admin"
+        navItems={[
+          { id: "dashboard", label: "Dashboard", active: true },
+          { id: "calendar", label: "Lịch phòng", onClick: () => window.location.assign("/calendar") },
+          { id: "users", label: "Quản lý CLB và tài khoản", onClick: () => window.location.assign("/admin/users") },
+        ]}
         primaryAction={
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => setTemplateOpen(true)}>
