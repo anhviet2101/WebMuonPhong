@@ -464,8 +464,6 @@ def _validate_transition(booking, target_status, user, reason, new_room):
         _validate_no_blackout_conflict(booking, booking.room)
 
     if target_status == APPROVED:
-        if not booking.scan_confirmed_at:
-            raise ValidationError("Cán bộ chưa xác nhận bản scan của đơn.")
         if booking.physical_status != CONFIRMED_RECEIVED:
             raise ValidationError("Chưa nhận bản cứng từ CLB")
         _ensure_room_can_be_booked(booking, booking.room)
@@ -510,6 +508,8 @@ def _validate_expire_transition(booking):
 
     if booking.scan_uploaded_at:
         raise ValidationError("Đơn đã nộp bản scan nên không thể tự hết hạn theo mốc scan.")
+    if booking.physical_status == CONFIRMED_RECEIVED:
+        raise ValidationError("Đơn đã nhận bản cứng nên không thể tự hết hạn theo mốc scan.")
 
 
 def _validate_complete_transition(booking):

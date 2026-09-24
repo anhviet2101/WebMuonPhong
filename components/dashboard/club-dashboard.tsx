@@ -918,7 +918,7 @@ export function ClubDashboard() {
                           <TableCell>
                             <BookingStatusBadge status={b.status} />
                             {(b.status === "pending_hold" || b.status === "draft") && (
-                              <p>{b.status === "draft" && !b.roomId ? <span className="text-xs text-slate-500">Chưa giữ phòng · lưu không giới hạn</span> : <HoldCountdown expiresAt={b.holdExpiresAt} />}</p>
+                              <p>{b.status === "draft" && !b.roomId ? <span className="text-xs text-slate-500">Chưa giữ phòng · lưu không giới hạn</span> : b.physicalStatus === "da_nhan_ban_cung" ? <span className="text-xs text-emerald-700">Đã nhận bản cứng · chờ duyệt</span> : b.scanUploadedAt ? <span className="text-xs text-emerald-700">Đã nộp scan · tiếp tục giữ phòng</span> : <HoldCountdown expiresAt={b.holdExpiresAt} />}</p>
                             )}
                           </TableCell>
                           <TableCell>

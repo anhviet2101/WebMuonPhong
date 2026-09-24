@@ -790,6 +790,7 @@ function BorrowingPolicyPanel() {
 
 export function AdminDashboard() {
   const store = usePrototypeStore();
+  const [queue, setQueue] = useState<"attention" | "missing" | "scan" | "paper" | "approved" | "history" | "all">("attention");
   const [search, setSearch] = useState(""),
     [status, setStatus] = useState("all"),
     [physical, setPhysical] = useState("all"),
@@ -800,7 +801,6 @@ export function AdminDashboard() {
     [toDate, setToDate] = useState(""),
     [sortBy, setSortBy] = useState("start_asc"),
     [weekDate, setWeekDate] = useState(dateKey(new Date())),
-    [selected, setSelected] = useState<Set<string>>(new Set()),
     [action, setAction] = useState<{
       type: "revision" | "room" | "cancel";
       booking: Booking;
@@ -839,6 +839,27 @@ export function AdminDashboard() {
       }),
     [visibleBookings, store.rooms, store.buildings, search, status, physical, campus, buildingFilter, roomFilter, fromDate, toDate, sortBy],
   );
+  const queueItems = [
+    { id: "attention", label: "Cần xử lý", description: "Đơn đang giữ chỗ hoặc cần sửa" },
+    { id: "missing", label: "Chưa nộp gì", description: "Thiếu cả scan và bản cứng" },
+    { id: "scan", label: "Đã nộp scan", description: "Chờ bản cứng" },
+    { id: "paper", label: "Đã nhận bản cứng", description: "Sẵn sàng duyệt, không cần scan" },
+    { id: "approved", label: "Đã duyệt", description: "Lịch đã xác nhận" },
+    { id: "history", label: "Lịch sử", description: "Hoàn thành, hủy hoặc hết hạn" },
+    { id: "all", label: "Tất cả đơn", description: "Toàn bộ trạng thái" },
+  ] as const;
+  const inQueue = (b: Booking, key: typeof queue) => {
+    const active = ["pending_hold", "needs_revision"].includes(b.status);
+    if (key === "attention") return active;
+    if (key === "missing") return active && !b.scanUploadedAt && b.physicalStatus === "chua_nhan";
+    if (key === "scan") return active && Boolean(b.scanUploadedAt) && b.physicalStatus === "chua_nhan";
+    if (key === "paper") return active && b.physicalStatus === "da_nhan_ban_cung";
+    if (key === "approved") return ["approved", "room_changed"].includes(b.status);
+    if (key === "history") return ["completed", "cancelled", "expired", "rejected"].includes(b.status);
+    return true;
+  };
+  const queueRows = filtered.filter((b) => inQueue(b, queue));
+  const queueTitle = queueItems.find((item) => item.id === queue)?.label ?? "Danh sách đơn";
   const weekStart = new Date(`${weekDate}T00:00:00`);
   weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
   const weekEnd = new Date(weekStart);
@@ -868,7 +889,7 @@ export function AdminDashboard() {
       visibleBookings.filter(
         (b) =>
           b.physicalStatus === "da_nhan_ban_cung" &&
-          b.status === "pending_hold",
+          ["pending_hold", "needs_revision"].includes(b.status),
       ).length,
       <FileCheck2 />,
     ],
@@ -964,7 +985,7 @@ export function AdminDashboard() {
                     ))}
                   </SelectContent>
                 </Select>
-                <Select value={status} onValueChange={setStatus}>
+                <Select value={status} onValueChange={(value) => { setStatus(value); setQueue("all"); }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -986,7 +1007,7 @@ export function AdminDashboard() {
                     ))}
                   </SelectContent>
                 </Select>
-                <Select value={physical} onValueChange={setPhysical}>
+                <Select value={physical} onValueChange={(value) => { setPhysical(value); setQueue("all"); }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -1021,9 +1042,16 @@ export function AdminDashboard() {
                     <SelectItem value="room">Tên phòng A–Z</SelectItem>
                   </SelectContent>
                 </Select>
-                <Button variant="outline" onClick={() => { setSearch(""); setStatus("all"); setPhysical("all"); setCampus("all"); setBuildingFilter("all"); setRoomFilter("all"); setFromDate(""); setToDate(""); setSortBy("start_asc"); }}>Xóa bộ lọc</Button>
+                <Button variant="outline" onClick={() => { setSearch(""); setStatus("all"); setPhysical("all"); setCampus("all"); setBuildingFilter("all"); setRoomFilter("all"); setFromDate(""); setToDate(""); setSortBy("start_asc"); setQueue("attention"); }}>Xóa bộ lọc</Button>
               </CardContent>
             </Card>
+            <div className="grid items-start gap-4 lg:grid-cols-[230px_minmax(0,1fr)]">
+              <Card className="lg:sticky lg:top-4">
+                <CardContent className="grid grid-cols-2 gap-1 p-2 md:grid-cols-3 lg:grid-cols-1" aria-label="Nhóm đơn theo tiến độ">
+                  {queueItems.map((item) => <button key={item.id} type="button" aria-current={queue === item.id ? "page" : undefined} className={`rounded-lg px-3 py-3 text-left transition ${queue === item.id ? "bg-blue-50 text-blue-900 ring-1 ring-blue-200" : "hover:bg-slate-50"}`} onClick={() => setQueue(item.id)}><span className="flex items-center justify-between gap-2 font-semibold"><span>{item.label}</span><span className="rounded-full bg-white px-2 py-0.5 text-xs tabular-nums ring-1 ring-slate-200">{filtered.filter((b) => inQueue(b, item.id)).length}</span></span><span className="mt-1 block text-xs text-slate-500">{item.description}</span></button>)}
+                </CardContent>
+              </Card>
+              <div className="min-w-0 space-y-4">
             <div className="flex justify-end">
               <Button onClick={() => setExporting(true)}>
                 <Download />
@@ -1031,26 +1059,11 @@ export function AdminDashboard() {
               </Button>
             </div>
             <Card>
+              <CardHeader><CardTitle>{queueTitle} · {queueRows.length}</CardTitle></CardHeader>
               <CardContent className="overflow-x-auto p-0">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>
-                        <input
-                          type="checkbox"
-                          checked={
-                            filtered.length > 0 &&
-                            filtered.every((b) => selected.has(b.id))
-                          }
-                          onChange={(e) =>
-                            setSelected(
-                              e.target.checked
-                                ? new Set(filtered.map((b) => b.id))
-                                : new Set(),
-                            )
-                          }
-                        />
-                      </TableHead>
                       <TableHead>Mã đơn / CLB</TableHead>
                       <TableHead>Hoạt động</TableHead>
                       <TableHead>Phòng / Thời gian</TableHead>
@@ -1060,17 +1073,17 @@ export function AdminDashboard() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filtered.length === 0 && (
+                    {queueRows.length === 0 && (
                       <TableRow>
                         <TableCell
-                          colSpan={7}
+                          colSpan={6}
                           className="py-12 text-center text-slate-500"
                         >
-                          Không có đơn phù hợp bộ lọc
+                          Không có đơn trong nhóm này với bộ lọc hiện tại
                         </TableCell>
                       </TableRow>
                     )}
-                    {filtered.map((b) => {
+                    {queueRows.map((b) => {
                       const canProcess = [
                           "pending_hold",
                           "needs_revision",
@@ -1081,21 +1094,6 @@ export function AdminDashboard() {
                         ].includes(b.status);
                       return (
                         <TableRow key={b.id}>
-                          <TableCell>
-                            <input
-                              type="checkbox"
-                              checked={selected.has(b.id)}
-                              onChange={(e) =>
-                                setSelected((current) => {
-                                  const next = new Set(current);
-                                  e.target.checked
-                                    ? next.add(b.id)
-                                    : next.delete(b.id);
-                                  return next;
-                                })
-                              }
-                            />
-                          </TableCell>
                           <TableCell>
                             <b>{b.id}</b>
                             <button
@@ -1128,29 +1126,28 @@ export function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <PhysicalStatusBadge status={b.physicalStatus} />
-                            {b.scanUploadedAt ? <p className="mt-1 text-xs text-blue-700">Scan: {b.scanConfirmedAt ? "đã xác nhận" : "chờ xác nhận"}</p> : <p className="mt-1 text-xs text-amber-700">Chưa có bản scan</p>}
+                            {b.scanUploadedAt ? <p className="mt-1 text-xs text-blue-700">Scan: {b.scanConfirmedAt ? "đã xác nhận" : "chờ xác nhận"}</p> : <p className="mt-1 text-xs text-slate-500">{b.physicalStatus === "da_nhan_ban_cung" ? "Không cần scan để duyệt" : "Chưa có bản scan"}</p>}
                             {b.paperDeadlineAt && !["cancelled", "expired", "rejected"].includes(b.status) && b.physicalStatus === "chua_nhan" && new Date(b.paperDeadlineAt) < new Date() && <p className="mt-1 text-xs font-medium text-red-600">Quá hạn bản cứng · cần liên hệ CLB</p>}
                           </TableCell>
                           <TableCell>
                             <BookingStatusBadge status={b.status} />
-                            {b.status === "pending_hold" && b.scanDeadlineAt && <p className="mt-1 text-xs text-amber-700">Hạn scan: {new Date(b.scanDeadlineAt).toLocaleString("vi-VN")}</p>}
-                            {b.paperDeadlineAt && <p className="mt-1 text-xs text-slate-500">Hạn giấy: {new Date(b.paperDeadlineAt).toLocaleString("vi-VN")}</p>}
+                            {canProcess && b.physicalStatus === "chua_nhan" && !b.scanUploadedAt && b.scanDeadlineAt && <p className="mt-1 text-xs text-amber-700">Hạn scan: {new Date(b.scanDeadlineAt).toLocaleString("vi-VN")}</p>}
+                            {canProcess && b.physicalStatus === "chua_nhan" && b.paperDeadlineAt && <p className="mt-1 text-xs text-slate-500">Hạn giấy: {new Date(b.paperDeadlineAt).toLocaleString("vi-VN")}</p>}
                           </TableCell>
                           <TableCell>
                             <div className="flex flex-wrap gap-2">
                               {b.scanUploadedAt && <Button size="sm" variant="outline" onClick={() => { void openBookingScan(b.id).catch(() => toast.error("Không thể mở bản scan.")); }}>Xem scan</Button>}
-                              <Button size="sm" variant="outline" disabled={!canProcess || !b.scanUploadedAt || Boolean(b.scanConfirmedAt)} onClick={async () => { try { await store.confirmScan(b.id); toast.success("Đã xác nhận bản scan"); } catch { toast.error("Không thể xác nhận bản scan"); } }}>Xác nhận scan</Button>
-                              <Button size="sm" variant="outline" disabled={!canProcess || b.physicalStatus === "da_nhan_ban_cung"} onClick={async () => { try { await store.confirmPhysical(b.id); toast.success("Đã ghi nhận bản cứng"); } catch { toast.error("Không thể xác nhận bản cứng"); } }}>Nhận bản cứng</Button>
-                              <Button size="sm" disabled={!canApproveStatus || !b.scanConfirmedAt || b.physicalStatus !== "da_nhan_ban_cung"} onClick={async () => { try { await store.updateBooking(b.id, { status: "approved" }); toast.success("Đã duyệt đơn"); } catch { /* Store shows the API error. */ } }}>Duyệt</Button>
-                              <DropdownMenu>
+                              {canProcess && b.physicalStatus === "chua_nhan" && b.scanUploadedAt && !b.scanConfirmedAt && <Button size="sm" variant="outline" onClick={async () => { try { await store.confirmScan(b.id); toast.success("Đã xác nhận bản scan"); } catch { toast.error("Không thể xác nhận bản scan"); } }}>Xác nhận scan</Button>}
+                              {canProcess && b.physicalStatus === "chua_nhan" && <Button size="sm" variant="outline" onClick={async () => { try { await store.confirmPhysical(b.id); toast.success("Đã ghi nhận bản cứng"); } catch { toast.error("Không thể xác nhận bản cứng"); } }}>Nhận bản cứng</Button>}
+                              {canApproveStatus && b.physicalStatus === "da_nhan_ban_cung" && <Button size="sm" onClick={async () => { try { await store.updateBooking(b.id, { status: "approved" }); toast.success("Đã duyệt đơn"); } catch { /* Store shows the API error. */ } }}>Duyệt</Button>}
+                              {!['completed', 'cancelled', 'rejected'].includes(b.status) && <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                   <Button size="icon-sm" variant="outline">
                                     <MoreHorizontal />
                                   </Button>
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end">
-                                  <DropdownMenuItem
-                                    disabled={!canProcess}
+                                  {canProcess && <DropdownMenuItem
                                     onClick={() =>
                                       setAction({
                                         type: "revision",
@@ -1159,16 +1156,16 @@ export function AdminDashboard() {
                                     }
                                   >
                                     Yêu cầu sửa
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem
+                                  </DropdownMenuItem>}
+                                  {['pending_hold', 'needs_revision', 'approved', 'room_changed'].includes(b.status) && <DropdownMenuItem
                                     onClick={() =>
                                       setAction({ type: "room", booking: b })
                                     }
                                   >
                                     Đổi phòng
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem onClick={() => { setDeadlineBooking(b); setScanDeadline(b.scanDeadlineAt ? toLocalInput(b.scanDeadlineAt) : ""); setPaperDeadline(b.paperDeadlineAt ? toLocalInput(b.paperDeadlineAt) : ""); }}>Gia hạn nộp đơn</DropdownMenuItem>
-                                  <DropdownMenuItem
+                                  </DropdownMenuItem>}
+                                  {['pending_hold', 'needs_revision', 'expired'].includes(b.status) && <DropdownMenuItem onClick={() => { setDeadlineBooking(b); setScanDeadline(b.scanDeadlineAt ? toLocalInput(b.scanDeadlineAt) : ""); setPaperDeadline(b.paperDeadlineAt ? toLocalInput(b.paperDeadlineAt) : ""); }}>Gia hạn nộp đơn</DropdownMenuItem>}
+                                  {!['expired'].includes(b.status) && <DropdownMenuItem
                                     variant="destructive"
                                     disabled={["cancelled", "rejected", "expired", "completed"].includes(b.status)}
                                     onClick={() =>
@@ -1176,9 +1173,9 @@ export function AdminDashboard() {
                                     }
                                   >
                                     Không cho mượn / hủy đơn
-                                  </DropdownMenuItem>
+                                  </DropdownMenuItem>}
                                 </DropdownMenuContent>
-                              </DropdownMenu>
+                              </DropdownMenu>}
                             </div>
                           </TableCell>
                         </TableRow>
@@ -1188,6 +1185,8 @@ export function AdminDashboard() {
                 </Table>
               </CardContent>
             </Card>
+              </div>
+            </div>
           </TabsContent>
           <TabsContent value="weekly" className="space-y-4">
             <Card><CardContent className="flex flex-wrap items-end gap-3 p-4">

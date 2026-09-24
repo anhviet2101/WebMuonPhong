@@ -337,6 +337,18 @@ class BookingApiTests(APITestCase):
         self.assertEqual(self.client.post(reverse("booking-confirm-physical", args=[booking_id])).status_code, 200)
         self.assertEqual(self.client.post(reverse("booking-approve", args=[booking_id])).status_code, 200)
 
+    def test_admin_can_approve_without_scan_after_receiving_hard_copy(self):
+        self.client.force_authenticate(self.user)
+        created = self.client.post(reverse("booking-list"), self._draft_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        booking_id = created.data["id"]
+        admin = User.objects.create_superuser("paper-admin", "paper@example.com", "password")
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.post(reverse("booking-approve", args=[booking_id])).status_code, 400)
+        self.assertEqual(self.client.post(reverse("booking-confirm-physical", args=[booking_id])).status_code, 200)
+        self.assertEqual(self.client.post(reverse("booking-approve", args=[booking_id])).status_code, 200)
+        self.assertIsNone(Booking.objects.get(pk=booking_id).scan_uploaded_at)
+
     def test_draft_without_room_has_no_expiry_and_is_hidden_from_admin_list(self):
         self.client.force_authenticate(self.user)
         response = self.client.post(reverse("booking-create-draft"), {"activity_name": "Unfinished"}, format="json")
@@ -505,19 +517,18 @@ class BookingApiTests(APITestCase):
             self.other_organization,
         )
 
-    def test_approve_requires_confirmed_scan_and_hard_copy(self):
+    def test_approve_requires_hard_copy_but_not_scan(self):
         booking = self._booking()
         submit_booking(booking, self.user)
         admin = User.objects.create_user("admin", password="password", is_staff=True)
         with self.assertRaises(ValidationError):
             approve_booking(booking, admin)
-        booking.scan_uploaded_at = timezone.now()
-        booking.scan_confirmed_at = timezone.now()
         booking.physical_status = PhysicalStatus.DA_NHAN_BAN_CUNG
-        booking.save(update_fields=["scan_uploaded_at", "scan_confirmed_at", "physical_status"])
+        booking.save(update_fields=["physical_status"])
         approved = approve_booking(booking, admin)
         self.assertEqual(approved.status, BookingStatus.APPROVED)
         self.assertEqual(approved.physical_status, PhysicalStatus.DA_NHAN_BAN_CUNG)
+        self.assertIsNone(approved.scan_uploaded_at)
 
     def test_available_rooms_excludes_conflicting_booking(self):
         booking = self._booking()
@@ -968,6 +979,22 @@ class BookingMaintenanceTaskTests(APITestCase):
                 type=Notification.NotificationType.EXPIRED,
             ).exists()
         )
+
+    def test_received_hard_copy_prevents_scan_timeout_expiry(self):
+        start = future_weekday()
+        booking = Booking.objects.create(
+            organization=self.organization, room=self.room, activity_name="Paper received",
+            description="Request", participant_count=5, contact_person="Person",
+            contact_phone="0900000000", contact_email="club@example.com",
+            start_time=start, end_time=start + timedelta(hours=1),
+            status=BookingStatus.PENDING_HOLD,
+            physical_status=PhysicalStatus.DA_NHAN_BAN_CUNG,
+            hold_expires_at=timezone.now() - timedelta(minutes=1),
+            scan_deadline_at=timezone.now() - timedelta(minutes=1), created_by=self.user,
+        )
+        self.assertEqual(auto_expire_unsubmitted_bookings(), 0)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, BookingStatus.PENDING_HOLD)
 
     def test_complete_task_updates_past_booking(self):
         end = timezone.now() - timedelta(minutes=1)

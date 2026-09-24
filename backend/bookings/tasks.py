@@ -30,6 +30,7 @@ def auto_expire_unsubmitted_bookings():
     booking_ids = list(
         Booking.objects.filter(
             status=BookingStatus.PENDING_HOLD,
+            physical_status=PhysicalStatus.CHUA_NHAN,
             scan_uploaded_at__isnull=True,
             scan_deadline_at__lt=now,
         ).values_list("id", flat=True)
@@ -45,6 +46,7 @@ def auto_expire_unsubmitted_bookings():
             )
             if not (
                 booking.status == BookingStatus.PENDING_HOLD
+                and booking.physical_status == PhysicalStatus.CHUA_NHAN
                 and not booking.scan_uploaded_at
                 and booking.scan_deadline_at
                 and booking.scan_deadline_at < timezone.now()
