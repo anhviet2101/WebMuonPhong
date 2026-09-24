@@ -1,4 +1,5 @@
 
+from copy import copy
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
@@ -547,12 +548,15 @@ class RoomViewSet(FacilityArchiveMixin, viewsets.ModelViewSet):
                     {"exclude_booking": "Booking loại trừ không hợp lệ."}
                 )
 
-        rooms = booking_service.get_available_rooms(
-            start_time,
-            end_time,
-            current_booking_id=exclude_booking.pk if exclude_booking else None,
-            queryset=queryset,
-        )
+        try:
+            rooms = booking_service.get_available_rooms(
+                start_time,
+                end_time,
+                current_booking_id=exclude_booking.pk if exclude_booking else None,
+                queryset=queryset,
+            )
+        except DjangoValidationError as exc:
+            raise ValidationError(_serialize_django_validation_error(exc)) from exc
 
         serializer = self.get_serializer(rooms, many=True)
         return Response(serializer.data)
@@ -571,6 +575,7 @@ class BookingViewSet(
     def get_permissions(self):
         action_permissions = {
             "create": [IsAuthenticated(), HasPermission("booking.create")],
+            "create_draft": [IsAuthenticated(), HasPermission("booking.create")],
             "submit": [IsAuthenticated(), HasPermission("booking.create")],
             "update_and_submit": [IsAuthenticated(), HasPermission("booking.create")],
             "approve": [IsAuthenticated(), HasPermission("booking.approve")],
@@ -584,6 +589,8 @@ class BookingViewSet(
         return action_permissions.get(self.action, super().get_permissions())
 
     def get_queryset(self):
+        if self.action in {"list", "retrieve"}:
+            booking_service.release_expired_drafts()
         queryset = (
             Booking.objects.select_related(
                 "organization",
@@ -596,6 +603,8 @@ class BookingViewSet(
             .all()
         )
         queryset = filter_bookings_for_user(queryset, self.request.user)
+        if self.action == "list" and is_admin(self.request.user):
+            queryset = queryset.exclude(status=BookingStatus.DRAFT)
         return _apply_booking_filters(queryset, self.request.query_params)
 
     def perform_create(self, serializer):
@@ -606,12 +615,30 @@ class BookingViewSet(
         serializer.is_valid(raise_exception=True)
         try:
             with transaction.atomic():
+                booking_service.release_expired_drafts()
                 self.perform_create(serializer)
                 booking = booking_service.submit_booking(serializer.instance, request.user)
         except DjangoValidationError as exc:
             raise ValidationError(_serialize_django_validation_error(exc)) from exc
         except DjangoPermissionDenied as exc:
             raise PermissionDenied(str(exc)) from exc
+        except IntegrityError as exc:
+            raise ValidationError("Phòng đã có lịch trùng trong khoảng thời gian này.") from exc
+        return Response(self.get_serializer(booking).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"], url_path="drafts")
+    def create_draft(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                booking_service.release_expired_drafts()
+                booking = Booking(created_by=request.user, **serializer.validated_data)
+                booking_service.prepare_draft_hold(booking)
+                booking.full_clean()
+                booking.save()
+        except DjangoValidationError as exc:
+            raise ValidationError(_serialize_django_validation_error(exc)) from exc
         except IntegrityError as exc:
             raise ValidationError("Phòng đã có lịch trùng trong khoảng thời gian này.") from exc
         return Response(self.get_serializer(booking).data, status=status.HTTP_201_CREATED)
@@ -655,14 +682,18 @@ class BookingViewSet(
         old_value = {
             "room_id": booking.room_id,
             "secondary_room_id": booking.secondary_room_id,
-            "start_time": booking.start_time.isoformat(),
-            "end_time": booking.end_time.isoformat(),
+            "start_time": booking.start_time.isoformat() if booking.start_time else None,
+            "end_time": booking.end_time.isoformat() if booking.end_time else None,
             "activity_name": booking.activity_name,
             "participant_count": booking.participant_count,
         }
         try:
             with transaction.atomic():
+                booking_service.release_expired_drafts()
+                previous = copy(booking) if booking.status == BookingStatus.DRAFT else None
                 instance = serializer.save()
+                if instance.status == BookingStatus.DRAFT:
+                    booking_service.prepare_draft_hold(instance, previous)
                 instance.full_clean()
                 if instance.status in CONFLICT_STATUSES:
                     booking_service.validate_active_booking_schedule(instance)
@@ -676,8 +707,8 @@ class BookingViewSet(
                     new_value={
                         "room_id": instance.room_id,
                         "secondary_room_id": instance.secondary_room_id,
-                        "start_time": instance.start_time.isoformat(),
-                        "end_time": instance.end_time.isoformat(),
+                        "start_time": instance.start_time.isoformat() if instance.start_time else None,
+                        "end_time": instance.end_time.isoformat() if instance.end_time else None,
                         "activity_name": instance.activity_name,
                         "participant_count": instance.participant_count,
                     },
@@ -762,6 +793,7 @@ class BookingViewSet(
 
     @action(detail=False, methods=["get"], url_path="calendar")
     def calendar(self, request):
+        booking_service.release_expired_drafts()
         queryset = (
             Booking.objects.select_related(
                 "organization",
@@ -771,7 +803,7 @@ class BookingViewSet(
                 "secondary_room",
                 "created_by",
             )
-            .filter(status__in=CONFLICT_STATUSES)
+            .filter(Q(status__in=CONFLICT_STATUSES) | Q(status=BookingStatus.DRAFT, hold_expires_at__gt=timezone.now()))
             .order_by("start_time")
         )
         queryset = _apply_booking_filters(queryset, request.query_params)
@@ -780,7 +812,7 @@ class BookingViewSet(
         data = []
         for booking in queryset:
             own = user_org_id is not None and booking.organization_id == user_org_id
-            if admin or own:
+            if (admin or own) and booking.status != BookingStatus.DRAFT:
                 data.append(self.get_serializer(booking).data)
                 continue
             data.append(

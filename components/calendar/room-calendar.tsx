@@ -167,7 +167,7 @@ function QuickBooking({
       return toast.error("Vui lòng nhập tên hoạt động");
     if (timeError) return toast.error(timeError);
     if (new Date(start) <= new Date()) return toast.error("Vui lòng chọn thời gian trong tương lai.");
-    if (!contactPerson.trim() || !contactPhone.trim() || !/^\S+@\S+\.\S+$/.test(contactEmail))
+    if (!contactPerson.trim() || !/^\+?[0-9][0-9 .-]*$/.test(contactPhone) || !/^\d{9,15}$/.test(contactPhone.replace(/\D/g, "")) || !/^\S+@\S+\.\S+$/.test(contactEmail))
       return toast.error("Vui lòng nhập đầy đủ tên, số điện thoại và email liên hệ hợp lệ");
     try {
       const { data } = await api.get(endpoints.availableRooms, {
@@ -225,7 +225,7 @@ function QuickBooking({
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-2"><Label>Người liên hệ</Label><Input value={contactPerson} onChange={(event) => setContactPerson(event.target.value)} /></div>
-            <div className="grid gap-2"><Label>Số điện thoại</Label><Input value={contactPhone} onChange={(event) => setContactPhone(event.target.value)} /></div>
+            <div className="grid gap-2"><Label>Số điện thoại</Label><Input inputMode="tel" value={contactPhone} onChange={(event) => setContactPhone(event.target.value.replace(/[^0-9+ .-]/g, ""))} /></div>
             <div className="grid gap-2 sm:col-span-2"><Label>Email</Label><Input type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} /></div>
           </div>
         </div>
@@ -249,9 +249,14 @@ function Blackout({
   close: () => void;
   buildingId: string;
 }) {
-  const { rooms, addBlackout } = usePrototypeStore();
-  const list = rooms.filter((r) => r.buildingId === buildingId);
+  const { rooms, buildings, campuses, addBlackout } = usePrototypeStore();
+  const [selectedCampus, setSelectedCampus] = useState(buildings.find((item) => item.id === buildingId)?.campusId ?? campuses[0]?.id ?? "");
+  const [selectedBuilding, setSelectedBuilding] = useState(buildingId);
+  const list = rooms.filter((r) => r.buildingId === selectedBuilding);
   const [room, setRoom] = useState(list[0]?.id ?? "");
+  useEffect(() => {
+    if (!list.some((item) => item.id === room)) setRoom(list[0]?.id ?? "");
+  }, [list, room]);
   const [start, setStart] = useState(toLocalInput(new Date().toISOString()));
   const [end, setEnd] = useState(
     toLocalInput(new Date(Date.now() + 7200000).toISOString()),
@@ -281,6 +286,20 @@ function Blackout({
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
+          <div className="grid gap-2">
+            <Label>Cơ sở</Label>
+            <Select value={selectedCampus} onValueChange={(value) => { setSelectedCampus(value); setSelectedBuilding(""); setRoom(""); }}>
+              <SelectTrigger className="w-full"><SelectValue placeholder="Chọn cơ sở" /></SelectTrigger>
+              <SelectContent>{campuses.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+            </Select>
+          </div>
+          <div className="grid gap-2">
+            <Label>Tòa nhà</Label>
+            <Select value={selectedBuilding} onValueChange={(value) => { setSelectedBuilding(value); setRoom(""); }}>
+              <SelectTrigger className="w-full"><SelectValue placeholder="Chọn tòa nhà" /></SelectTrigger>
+              <SelectContent>{buildings.filter((item) => item.campusId === selectedCampus).map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+            </Select>
+          </div>
           <div className="grid gap-2">
             <Label>Phòng</Label>
             <Select value={room} onValueChange={setRoom}>
@@ -431,6 +450,7 @@ export function RoomCalendar() {
       0,
     );
     if (d <= new Date()) return toast.error("Vui lòng chọn khung giờ trong tương lai.");
+    if (d.getDay() === 0) return toast.error("Không nhận đăng ký mượn phòng vào Chủ nhật.");
     setDraft({ room, start: toLocalInput(d.toISOString()) });
   };
   return (

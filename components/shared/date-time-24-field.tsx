@@ -20,9 +20,10 @@ export function DateTime24Field({
   return (
     <div className="grid gap-2">
       <Label>{label}</Label>
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+      <div className="grid min-w-0 gap-2">
         <Input
           type="date"
+          className="min-w-0 w-full"
           aria-label={`${label} - ngày`}
           value={date}
           onChange={(event) => onChange(event.target.value ? `${event.target.value}T${hour}:${minute}` : "")}
@@ -67,6 +68,9 @@ export function bookingTimeError(
   if (start.slice(0, 10) !== end.slice(0, 10))
     return "Giờ bắt đầu và kết thúc phải cùng một ngày.";
   if (endDate <= startDate) return "Giờ kết thúc phải sau giờ bắt đầu.";
+  if (startDate.getDay() === 0) return "Không nhận đăng ký mượn phòng vào Chủ nhật.";
+  if (endDate.getHours() * 60 + endDate.getMinutes() > 21 * 60)
+    return "Đơn mượn phòng phải kết thúc trước hoặc đúng 21:00.";
   if (bounds) {
     const startMinute = startDate.getHours() * 60 + startDate.getMinutes();
     const endMinute = endDate.getHours() * 60 + endDate.getMinutes();

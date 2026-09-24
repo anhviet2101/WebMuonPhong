@@ -78,11 +78,13 @@ import {
   scheduleRowDisplay,
   type ScheduleRow,
 } from "@/components/shared/document-export";
+import { DocumentDateField } from "@/components/shared/document-date-field";
 const fmt = (iso: string) =>
   new Intl.DateTimeFormat("vi-VN", {
     dateStyle: "short",
     timeStyle: "short",
   }).format(new Date(iso));
+const dateKey = (value: Date) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 function ActionDialog({
   action,
   close,
@@ -93,6 +95,10 @@ function ActionDialog({
   const store = usePrototypeStore();
   const [reason, setReason] = useState("");
   const [room, setRoom] = useState("");
+  const currentRoom = store.rooms.find((item) => item.id === action?.booking.roomId);
+  const currentBuilding = store.buildings.find((item) => item.id === currentRoom?.buildingId);
+  const [targetCampus, setTargetCampus] = useState(currentBuilding?.campusId ?? store.campuses[0]?.id ?? "");
+  const [targetBuilding, setTargetBuilding] = useState(currentRoom?.buildingId ?? "");
   const [availableRoomIds, setAvailableRoomIds] = useState<string[] | null>(null);
   const [loadingRooms, setLoadingRooms] = useState(false);
   useEffect(() => {
@@ -106,6 +112,7 @@ function ActionDialog({
         start_time: action.booking.startAt,
         end_time: action.booking.endAt,
         exclude_booking: action.booking.id,
+        participant_count: action.booking.participants,
       },
     }).then(({ data }) => {
       if (!cancelled) setAvailableRoomIds(
@@ -125,6 +132,7 @@ function ActionDialog({
     ? store.rooms.filter(
         (r) =>
           r.id !== action.booking.roomId &&
+          r.buildingId === targetBuilding &&
           availableRoomIds.includes(r.id),
       )
     : [];
@@ -138,6 +146,7 @@ function ActionDialog({
             start_time: action.booking.startAt,
             end_time: action.booking.endAt,
             exclude_booking: action.booking.id,
+            participant_count: action.booking.participants,
           },
         });
         const freshIds = (data.results ?? data).map((item: { id: number | string }) => String(item.id));
@@ -190,6 +199,16 @@ function ActionDialog({
         </DialogHeader>
         {action?.type === "room" && (
           <div className="grid gap-2">
+            <Label>Cơ sở</Label>
+            <Select value={targetCampus} onValueChange={(value) => { setTargetCampus(value); setTargetBuilding(""); setRoom(""); }}>
+              <SelectTrigger className="w-full"><SelectValue placeholder="Chọn cơ sở" /></SelectTrigger>
+              <SelectContent>{store.campuses.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+            </Select>
+            <Label>Tòa nhà</Label>
+            <Select value={targetBuilding} onValueChange={(value) => { setTargetBuilding(value); setRoom(""); }}>
+              <SelectTrigger className="w-full"><SelectValue placeholder="Chọn tòa nhà" /></SelectTrigger>
+              <SelectContent>{store.buildings.filter((item) => item.campusId === targetCampus).map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+            </Select>
             <Label>Phòng còn trống</Label>
             <p className="text-xs text-slate-500">
               {loadingRooms ? "Đang kiểm tra phòng..." : alternatives.length === 0 ? "Không có phòng khả dụng trong khung giờ này." : `${alternatives.length} phòng khả dụng`}
@@ -302,19 +321,11 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
         <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-2">
           <div className="grid gap-2">
             <Label>Từ ngày</Label>
-            <Input
-              type="date"
-              value={from}
-              onChange={(event) => setFrom(event.target.value)}
-            />
+            <DocumentDateField label="Từ ngày xuất Mẫu B" value={from} onChange={setFrom} />
           </div>
           <div className="grid gap-2">
             <Label>Đến ngày</Label>
-            <Input
-              type="date"
-              value={to}
-              onChange={(event) => setTo(event.target.value)}
-            />
+            <DocumentDateField label="Đến ngày xuất Mẫu B" value={to} onChange={setTo} />
           </div>
         </div>
         <div className="grid gap-3 rounded-lg border bg-white p-4 sm:grid-cols-2">
@@ -380,7 +391,7 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
           <Button
             variant="outline"
             disabled={!selectedRows.length}
-            onClick={() => printSchedule(selectedRows, draftTemplate, { issueDate })}
+            onClick={() => { if (!printSchedule(selectedRows, draftTemplate, { issueDate })) toast.error("Trình duyệt đã chặn cửa sổ in. Vui lòng cho phép popup cho trang này."); }}
           >
             <Printer />
             In đơn
@@ -571,6 +582,7 @@ function Facility() {
   const [campusForm, setCampusForm] = useState<Campus | null>(null);
   const [buildingForm, setBuildingForm] = useState<Building | null>(null);
   const [roomForm, setRoomForm] = useState<Room | null>(null);
+  const [roomCampusId, setRoomCampusId] = useState(campusId);
   useEffect(() => {
     if (!store.campuses.some((item) => item.id === campusId)) {
       setCampusId(store.campuses[0]?.id ?? "");
@@ -585,7 +597,7 @@ function Facility() {
   const toggle = (enabled: boolean) => enabled ? "Đang hiển thị" : "Đã ẩn";
   const openNewCampus = () => setCampusForm({ id: "", code: "", name: "", address: "", active: true });
   const openNewBuilding = () => setBuildingForm({ id: "", campusId, code: "", name: "", active: true });
-  const openNewRoom = () => setRoomForm({ id: "", buildingId, name: "", capacity: 50, equipment: [], rentable: true, bufferMinutes: 15, active: true });
+  const openNewRoom = () => { setRoomCampusId(campusId); setRoomForm({ id: "", buildingId, name: "", capacity: 50, equipment: [], rentable: true, bufferMinutes: 15, active: true }); };
   const archive = async (kind: "campus" | "building" | "room", id: string, name: string) => {
     const label = kind === "campus" ? "cơ sở" : kind === "building" ? "tòa nhà" : "phòng";
     if (!window.confirm(`Xóa ${label} "${name}"? Đơn cũ vẫn được giữ. Các địa điểm bên dưới sẽ tạm ẩn.`)) return;
@@ -666,7 +678,7 @@ function Facility() {
                   <b>{item.name}</b>
                   <p className="text-xs text-slate-500">{showArchived ? `Đã xóa · ${[...store.buildings, ...store.archivedBuildings].find((building) => building.id === item.buildingId)?.name ?? "Tòa nhà"}` : `${item.capacity === null ? "Chưa cập nhật sức chứa" : `${item.capacity} người`} · Buffer ${item.bufferMinutes} phút · ${item.rentable ? "Cho mượn" : "Tạm ngưng"}`}</p>
                 </div>
-                <div className="flex gap-2">{showArchived ? <Button size="sm" variant="outline" onClick={() => void restore("room", item.id)}>Khôi phục</Button> : <><Button size="sm" variant="outline" onClick={() => setRoomForm(item)}>Sửa</Button><Button size="sm" variant="destructive" onClick={() => void archive("room", item.id, item.name)}>Xóa</Button></>}</div>
+                <div className="flex gap-2">{showArchived ? <Button size="sm" variant="outline" onClick={() => void restore("room", item.id)}>Khôi phục</Button> : <><Button size="sm" variant="outline" onClick={() => { setRoomCampusId(store.buildings.find((building) => building.id === item.buildingId)?.campusId ?? campusId); setRoomForm(item); }}>Sửa</Button><Button size="sm" variant="destructive" onClick={() => void archive("room", item.id, item.name)}>Xóa</Button></>}</div>
               </div>
             </div>
           ))}
@@ -704,10 +716,15 @@ function Facility() {
         <DialogContent>
           <DialogHeader><DialogTitle>{roomForm?.id ? "Sửa phòng" : "Thêm phòng"}</DialogTitle></DialogHeader>
           <div className="grid gap-3">
+            <Label>Cơ sở</Label>
+            <Select value={roomCampusId} onValueChange={(value) => { setRoomCampusId(value); setRoomForm((state) => state && { ...state, buildingId: store.buildings.find((item) => item.campusId === value)?.id ?? "" }); }}>
+              <SelectTrigger><SelectValue placeholder="Chọn cơ sở" /></SelectTrigger>
+              <SelectContent>{store.campuses.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+            </Select>
             <Label>Tòa nhà</Label>
             <Select value={roomForm?.buildingId ?? ""} onValueChange={(value) => setRoomForm((state) => state && { ...state, buildingId: value })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>{store.buildings.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+              <SelectContent>{store.buildings.filter((item) => item.campusId === roomCampusId).map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
             </Select>
             <Label>Tên phòng</Label><Input value={roomForm?.name ?? ""} onChange={(e) => setRoomForm((value) => value && { ...value, name: e.target.value })} />
             <Label>Sức chứa</Label><Input type="number" min="1" value={roomForm?.capacity ?? ""} onChange={(e) => setRoomForm((value) => value && { ...value, capacity: e.target.value ? Number(e.target.value) : null })} />
@@ -727,6 +744,12 @@ export function AdminDashboard() {
     [status, setStatus] = useState("all"),
     [physical, setPhysical] = useState("all"),
     [campus, setCampus] = useState("all"),
+    [buildingFilter, setBuildingFilter] = useState("all"),
+    [roomFilter, setRoomFilter] = useState("all"),
+    [fromDate, setFromDate] = useState(""),
+    [toDate, setToDate] = useState(""),
+    [sortBy, setSortBy] = useState("start_asc"),
+    [weekDate, setWeekDate] = useState(dateKey(new Date())),
     [selected, setSelected] = useState<Set<string>>(new Set()),
     [action, setAction] = useState<{
       type: "revision" | "reject" | "room" | "cancel";
@@ -736,38 +759,55 @@ export function AdminDashboard() {
     [supportOpen, setSupportOpen] = useState(false),
     [templateOpen, setTemplateOpen] = useState(false),
     [clubProfile, setClubProfile] = useState<Booking | null>(null);
+  const visibleBookings = useMemo(() => store.bookings.filter((b) => b.status !== "draft"), [store.bookings]);
   const filtered = useMemo(
     () =>
-      store.bookings.filter((b) => {
+      visibleBookings.filter((b) => {
         const room = store.rooms.find((r) => r.id === b.roomId),
           building = store.buildings.find((x) => x.id === room?.buildingId);
+        const day = b.startAt ? dateKey(new Date(b.startAt)) : "";
         return (
-          `${b.id} ${b.clubName} ${b.activityName}`
+          `${b.id} ${b.clubName} ${b.activityName} ${b.contactPerson} ${b.contactPhone}`
             .toLowerCase()
-            .includes(search.toLowerCase()) &&
+            .includes(search.trim().toLowerCase()) &&
           (status === "all" || b.status === status) &&
           (physical === "all" || b.physicalStatus === physical) &&
-          (campus === "all" || building?.campusId === campus)
+          (campus === "all" || building?.campusId === campus) &&
+          (buildingFilter === "all" || room?.buildingId === buildingFilter) &&
+          (roomFilter === "all" || b.roomId === roomFilter) &&
+          (!fromDate || day >= fromDate) && (!toDate || day <= toDate)
         );
+      }).sort((a, b) => {
+        if (sortBy === "start_desc") return new Date(b.startAt).getTime() - new Date(a.startAt).getTime();
+        if (sortBy === "created_desc") return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        if (sortBy === "club") return a.clubName.localeCompare(b.clubName, "vi");
+        if (sortBy === "room") return (a.roomName ?? "").localeCompare(b.roomName ?? "", "vi");
+        return new Date(a.startAt).getTime() - new Date(b.startAt).getTime();
       }),
-    [store.bookings, store.rooms, search, status, physical, campus],
+    [visibleBookings, store.rooms, store.buildings, search, status, physical, campus, buildingFilter, roomFilter, fromDate, toDate, sortBy],
   );
+  const weekStart = new Date(`${weekDate}T00:00:00`);
+  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekEnd.getDate() + 7);
+  const weeklyBookings = visibleBookings.filter((b) => new Date(b.startAt) >= weekStart && new Date(b.startAt) < weekEnd)
+    .sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime());
   const metrics = [
     [
       "Đơn chờ xử lý",
-      store.bookings.filter((b) =>
+      visibleBookings.filter((b) =>
         ["pending_hold", "needs_revision"].includes(b.status),
       ).length,
       <Clock3 />,
     ],
     [
       "Chưa nhận bản giấy",
-      store.bookings.filter((b) => b.physicalStatus === "chua_nhan").length,
+      visibleBookings.filter((b) => b.physicalStatus === "chua_nhan").length,
       <FileWarning />,
     ],
     [
       "Đã nhận & chờ duyệt",
-      store.bookings.filter(
+      visibleBookings.filter(
         (b) =>
           b.physicalStatus === "da_nhan_ban_cung" &&
           b.status === "pending_hold",
@@ -776,14 +816,14 @@ export function AdminDashboard() {
     ],
     [
       "Đã duyệt",
-      store.bookings.filter((b) =>
+      visibleBookings.filter((b) =>
         ["approved", "room_changed"].includes(b.status),
       ).length,
       <CheckCircle2 />,
     ],
     [
       "7 ngày tới",
-      store.bookings.filter(
+      visibleBookings.filter(
         (b) =>
           new Date(b.startAt) < new Date(Date.now() + 7 * 86400000) &&
           new Date(b.startAt) > new Date(),
@@ -837,6 +877,7 @@ export function AdminDashboard() {
         <Tabs defaultValue="bookings">
           <TabsList>
             <TabsTrigger value="bookings">Danh sách đơn</TabsTrigger>
+            <TabsTrigger value="weekly">Đơn theo tuần</TabsTrigger>
             <TabsTrigger value="facilities">Quản lý cơ sở & phòng</TabsTrigger>
           </TabsList>
           <TabsContent value="bookings" className="space-y-4">
@@ -851,7 +892,7 @@ export function AdminDashboard() {
                     placeholder="CLB, hoạt động, mã đơn"
                   />
                 </div>
-                <Select value={campus} onValueChange={setCampus}>
+                <Select value={campus} onValueChange={(value) => { setCampus(value); setBuildingFilter("all"); setRoomFilter("all"); }}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -877,9 +918,11 @@ export function AdminDashboard() {
                       "room_changed",
                       "rejected",
                       "cancelled",
+                      "completed",
+                      "expired",
                     ].map((s) => (
                       <SelectItem key={s} value={s}>
-                        {s}
+                        {({ pending_hold: "Đang giữ chỗ", needs_revision: "Cần chỉnh sửa", approved: "Đã duyệt", room_changed: "Đã đổi phòng", rejected: "Bị từ chối", cancelled: "Đã hủy", completed: "Đã hoàn thành", expired: "Hết hạn" } as Record<string, string>)[s] ?? s}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -899,6 +942,27 @@ export function AdminDashboard() {
                     )}
                   </SelectContent>
                 </Select>
+                <Select value={buildingFilter} onValueChange={(value) => { setBuildingFilter(value); setRoomFilter("all"); }}>
+                  <SelectTrigger className="w-full"><SelectValue placeholder="Tòa nhà" /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">Tất cả tòa nhà</SelectItem>{store.buildings.filter((item) => campus === "all" || item.campusId === campus).map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
+                </Select>
+                <Select value={roomFilter} onValueChange={setRoomFilter}>
+                  <SelectTrigger className="w-full"><SelectValue placeholder="Phòng" /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">Tất cả phòng</SelectItem>{store.rooms.filter((item) => buildingFilter === "all" ? (campus === "all" || store.buildings.some((b) => b.id === item.buildingId && b.campusId === campus)) : item.buildingId === buildingFilter).map((item) => <SelectItem key={item.id} value={item.id}>{item.name} · {store.buildings.find((b) => b.id === item.buildingId)?.name}</SelectItem>)}</SelectContent>
+                </Select>
+                <label className="grid gap-1 text-xs text-slate-600">Từ ngày<Input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+                <label className="grid gap-1 text-xs text-slate-600">Đến ngày<Input type="date" min={fromDate || undefined} value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+                <Select value={sortBy} onValueChange={setSortBy}>
+                  <SelectTrigger className="w-full"><SelectValue placeholder="Sắp xếp" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="start_asc">Lịch gần nhất trước</SelectItem>
+                    <SelectItem value="start_desc">Lịch xa nhất trước</SelectItem>
+                    <SelectItem value="created_desc">Đơn mới tạo trước</SelectItem>
+                    <SelectItem value="club">Tên CLB A–Z</SelectItem>
+                    <SelectItem value="room">Tên phòng A–Z</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button variant="outline" onClick={() => { setSearch(""); setStatus("all"); setPhysical("all"); setCampus("all"); setBuildingFilter("all"); setRoomFilter("all"); setFromDate(""); setToDate(""); setSortBy("start_asc"); }}>Xóa bộ lọc</Button>
               </CardContent>
             </Card>
             <div className="flex justify-end">
@@ -998,14 +1062,16 @@ export function AdminDashboard() {
                           <TableCell>
                             {store.rooms.find((r) => r.id === b.roomId)?.name ?? b.roomName}
                             <p className="text-xs text-slate-500">
-                              {fmt(b.startAt)}
+                              {fmt(b.startAt)}–{new Date(b.endAt).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}
                             </p>
+                            <p className="text-xs text-slate-400">{b.buildingName} · {b.campusName}</p>
                           </TableCell>
                           <TableCell>
                             <PhysicalStatusBadge status={b.physicalStatus} />
                           </TableCell>
                           <TableCell>
                             <BookingStatusBadge status={b.status} />
+                            {b.status === "pending_hold" && b.holdExpiresAt && <p className="mt-1 text-xs text-amber-700">Giữ đến {new Date(b.holdExpiresAt).toLocaleString("vi-VN")}</p>}
                           </TableCell>
                           <TableCell>
                             <div className="flex gap-2">
@@ -1077,6 +1143,27 @@ export function AdminDashboard() {
                 </Table>
               </CardContent>
             </Card>
+          </TabsContent>
+          <TabsContent value="weekly" className="space-y-4">
+            <Card><CardContent className="flex flex-wrap items-end gap-3 p-4">
+              <Button variant="outline" onClick={() => { const day = new Date(`${weekDate}T12:00:00`); day.setDate(day.getDate() - 7); setWeekDate(dateKey(day)); }}>Tuần trước</Button>
+              <div className="min-w-48"><Label>Chọn ngày trong tuần</Label><DocumentDateField label="Chọn tuần xem đơn" value={weekDate} onChange={setWeekDate} /></div>
+              <Button variant="outline" onClick={() => { const day = new Date(`${weekDate}T12:00:00`); day.setDate(day.getDate() + 7); setWeekDate(dateKey(day)); }}>Tuần sau</Button>
+              <p className="text-sm text-slate-600">{weekStart.toLocaleDateString("vi-VN")} – {new Date(weekEnd.getTime() - 1).toLocaleDateString("vi-VN")} · {weeklyBookings.length} đơn</p>
+            </CardContent></Card>
+            <div className="grid gap-3 lg:grid-cols-2">
+              {Array.from({ length: 7 }, (_, index) => {
+                const day = new Date(weekStart);
+                day.setDate(day.getDate() + index);
+                const bookings = weeklyBookings.filter((b) => dateKey(new Date(b.startAt)) === dateKey(day));
+                return <Card key={dateKey(day)}><CardHeader><CardTitle className="text-base">{day.toLocaleDateString("vi-VN", { weekday: "long", day: "2-digit", month: "2-digit" })} · {bookings.length} đơn</CardTitle></CardHeader>
+                  <CardContent className="space-y-2">{bookings.length ? bookings.map((b) => <div key={b.id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2"><b>#{b.id} · {b.clubName}</b><BookingStatusBadge status={b.status} /></div>
+                    <p>{b.activityName}</p><p className="text-slate-600">{b.roomName ?? b.roomId} · {new Date(b.startAt).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}–{new Date(b.endAt).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })} · {b.participants} người</p>
+                  </div>) : <p className="text-sm text-slate-500">Không có đơn</p>}</CardContent>
+                </Card>;
+              })}
+            </div>
           </TabsContent>
           <TabsContent value="facilities">
             <Facility />

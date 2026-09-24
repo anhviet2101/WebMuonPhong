@@ -170,6 +170,7 @@ type Store = {
   archiveBuilding: (id: string) => Promise<void>;
   restoreBuilding: (id: string) => Promise<void>;
   addBooking: (data: NewBooking) => Promise<Booking>;
+  saveDraft: (data: NewBooking, id?: string) => Promise<Booking>;
   updateBooking: (id: string, patch: Partial<Booking>) => Promise<void>;
   cancelBooking: (id: string, reason?: string) => Promise<void>;
   addBlackout: (data: Omit<Blackout, "id">) => Promise<void>;
@@ -254,8 +255,8 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
   });
   const mapBooking = (b: any): Booking => ({
     id: String(b.id), clubCode: b.organization?.toString() ?? "", clubName: b.organization_name ?? "CLB",
-    activityName: b.activity_name, description: b.description, roomId: String(b.room), roomName: b.room_name, buildingName: b.building_name, campusName: b.campus_name, backupRoomId: b.secondary_room ? String(b.secondary_room) : undefined,
-    startAt: b.start_time, endAt: b.end_time, participants: b.participant_count, contactPerson: b.contact_person,
+    activityName: b.activity_name ?? "", description: b.description ?? "", roomId: b.room ? String(b.room) : "", roomName: b.room_name, buildingName: b.building_name, campusName: b.campus_name, backupRoomId: b.secondary_room ? String(b.secondary_room) : undefined,
+    startAt: b.start_time ?? "", endAt: b.end_time ?? "", participants: b.participant_count ?? 0, contactPerson: b.contact_person ?? "",
     contactPhone: b.contact_phone, contactEmail: b.contact_email,     equipment: Object.entries(b.equipment_request ?? {})
       .filter(([, enabled]) => Boolean(enabled))
       .map(([name]) => name as Equipment),
@@ -333,6 +334,20 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     ];
     void Promise.all(requests);
   }, [admin]);
+  useEffect(() => {
+    const refreshBookings = () => {
+      if (document.hidden) return;
+      void api.get(endpoints.bookings).then(({ data }) => {
+        setBookings((data.results ?? data).map(mapBooking));
+      }).catch(() => { /* Keep the last known list during a temporary network error. */ });
+    };
+    const timer = window.setInterval(refreshBookings, 60_000);
+    document.addEventListener("visibilitychange", refreshBookings);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshBookings);
+    };
+  }, []);
   useEffect(() => {
     const checkExpiringHolds = () => {
       const now = Date.now();
@@ -526,6 +541,34 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           throw error;
         }
       },
+      saveDraft: async (data, id) => {
+        const payload = {
+          room: data.roomId ? Number(data.roomId) : null,
+          secondary_room: data.backupRoomId ? Number(data.backupRoomId) : null,
+          activity_name: data.activityName,
+          description: data.description,
+          participant_count: Number.isInteger(data.participants) && data.participants > 0 ? data.participants : null,
+          contact_person: data.contactPerson,
+          contact_phone: data.contactPhone,
+          contact_email: data.contactEmail,
+          start_time: data.startAt || null,
+          end_time: data.endAt || null,
+          equipment_request: {},
+        };
+        try {
+          const { data: remote } = id
+            ? await api.patch(`${endpoints.bookings}${id}/`, payload)
+            : await api.post(`${endpoints.bookings}drafts/`, payload);
+          const booking = mapBooking(remote);
+          setBookings((items) => id
+            ? items.map((item) => item.id === id ? booking : item)
+            : [booking, ...items]);
+          return booking;
+        } catch (error) {
+          showApiError(error, "Không thể lưu bản nháp");
+          throw error;
+        }
+      },
       updateBooking: async (id, patch) => {
         const action = patch.status === "approved" ? "approve" : patch.status === "rejected" ? "reject" : patch.status === "needs_revision" ? "request-revision" : patch.status === "pending_hold" ? "submit" : undefined;
         const payload = {
@@ -616,6 +659,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
       updateRoom: async (id, patch) => {
         try {
           const { data } = await api.patch(`${endpoints.rooms}${id}/`, {
+            building: patch.buildingId ? Number(patch.buildingId) : undefined,
             name: patch.name,
             capacity: patch.capacity,
             rentable: patch.rentable,
@@ -709,7 +753,9 @@ export function usePrototypeStore() {
   return value;
 }
 export function toLocalInput(iso: string) {
+  if (!iso) return "";
   const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
 }

@@ -3,7 +3,12 @@ from django.db import transaction
 from django.utils import timezone
 
 from backend.bookings.models import Booking, BookingStatus, PhysicalStatus
-from backend.bookings.services.booking_service import transition_status
+from backend.bookings.services.booking_service import release_expired_drafts, transition_status
+
+
+@shared_task
+def auto_release_expired_draft_holds():
+    return release_expired_drafts()
 
 
 @shared_task

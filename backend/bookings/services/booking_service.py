@@ -1,4 +1,5 @@
 from datetime import timedelta
+import re
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.mail import send_mail
@@ -49,12 +50,56 @@ BLACKOUT_BUILDING = BlackoutScopeType.BUILDING.value
 BLACKOUT_FLOOR = BlackoutScopeType.FLOOR.value
 
 CONFLICT_STATUSES = [PENDING_HOLD, APPROVED, ROOM_CHANGED]
+DRAFT_HOLD_HOURS = 1
+
+
+def release_expired_drafts():
+    """Keep the draft, but release its room as soon as its one-hour hold ends."""
+    now = timezone.now()
+    return Booking.objects.filter(
+        status=DRAFT, room__isnull=False, hold_expires_at__lte=now,
+    ).update(room=None, secondary_room=None, during=None, hold_expires_at=None, updated_at=now)
+
+
+def validate_booking_window(start_time, end_time):
+    if not start_time or not end_time or start_time >= end_time:
+        raise ValidationError("Vui lòng chọn thời gian bắt đầu và kết thúc hợp lệ.")
+    start = timezone.localtime(start_time)
+    end = timezone.localtime(end_time)
+    if start.date() != end.date():
+        raise ValidationError("Đơn mượn phòng phải bắt đầu và kết thúc trong cùng một ngày.")
+    if start.weekday() == 6:
+        raise ValidationError("Không nhận đăng ký mượn phòng vào Chủ nhật.")
+    if end.hour * 60 + end.minute > 21 * 60 or (end.hour == 21 and (end.second or end.microsecond)):
+        raise ValidationError("Thời gian mượn phòng phải kết thúc trước hoặc đúng 21:00.")
+
+
+def prepare_draft_hold(booking, previous=None):
+    if not booking.room_id:
+        booking.hold_expires_at = None
+        booking.secondary_room = None
+        return
+    release_expired_drafts()
+    validate_booking_window(booking.start_time, booking.end_time)
+    _ensure_room_can_be_booked(booking, booking.room)
+    _validate_no_room_conflict(booking, booking.room)
+    _validate_no_blackout_conflict(booking, booking.room)
+    same_slot = previous and (
+        previous.room_id == booking.room_id
+        and previous.start_time == booking.start_time
+        and previous.end_time == booking.end_time
+        and previous.hold_expires_at
+        and previous.hold_expires_at > timezone.now()
+    )
+    booking.hold_expires_at = previous.hold_expires_at if same_slot else timezone.now() + timedelta(hours=DRAFT_HOLD_HOURS)
 
 
 def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=None):
     """Return rooms free of active holds, bookings and blackouts, including buffers."""
     if not start_time or not end_time or start_time >= end_time:
         raise ValidationError("Thời gian kết thúc phải sau thời gian bắt đầu.")
+    release_expired_drafts()
+    validate_booking_window(start_time, end_time)
 
     rooms = queryset if queryset is not None else Room.objects.select_related(
         "building", "building__campus"
@@ -73,10 +118,9 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
         buffered_end = end_time + timedelta(minutes=after)
         conflicts = Booking.objects.filter(
             room=room,
-            status__in=CONFLICT_STATUSES,
             start_time__lt=buffered_end + timedelta(minutes=before),
             end_time__gt=buffered_start - timedelta(minutes=after),
-        )
+        ).filter(Q(status__in=CONFLICT_STATUSES) | Q(status=DRAFT, hold_expires_at__gt=timezone.now()))
         if current_booking_id is not None:
             conflicts = conflicts.exclude(pk=current_booking_id)
         if conflicts.exists():
@@ -101,6 +145,8 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
 
 def validate_active_booking_schedule(booking):
     """Recheck all server-side availability rules after an active booking edit."""
+    validate_booking_window(booking.start_time, booking.end_time)
+    release_expired_drafts()
     _ensure_room_can_be_booked(booking, booking.room)
     _validate_no_room_conflict(booking, booking.room)
     _validate_no_blackout_conflict(booking, booking.room)
@@ -172,6 +218,8 @@ def transition_status(booking, target_status, user, reason=None, new_room=None):
 
     try:
         with transaction.atomic():
+            if target_status in {PENDING_HOLD, ROOM_CHANGED}:
+                release_expired_drafts()
             locked_booking = _lock_booking(booking)
             old_value = _booking_audit_snapshot(locked_booking)
 
@@ -337,6 +385,13 @@ def _validate_transition(booking, target_status, user, reason, new_room):
         _require_yu_admin(user)
 
     if target_status == PENDING_HOLD:
+        if booking.status == DRAFT and booking.hold_expires_at and booking.hold_expires_at <= timezone.now():
+            raise ValidationError("Thời gian giữ phòng của bản nháp đã hết. Vui lòng chọn lại phòng.")
+        validate_booking_window(booking.start_time, booking.end_time)
+        if not all((booking.room_id, booking.activity_name.strip(), booking.description.strip(), booking.participant_count, booking.contact_person.strip(), booking.contact_phone.strip(), booking.contact_email.strip())):
+            raise ValidationError("Vui lòng điền đầy đủ phòng, hoạt động, thời gian, số người và thông tin liên hệ trước khi gửi đơn.")
+        if not re.fullmatch(r"\+?[0-9][0-9 .-]*", booking.contact_phone) or not 9 <= len(re.sub(r"\D", "", booking.contact_phone)) <= 15:
+            raise ValidationError("Số điện thoại/Zalo không hợp lệ.")
         _ensure_room_can_be_booked(booking, booking.room)
         _validate_business_rules(booking)
         _validate_no_room_conflict(booking, booking.room)
@@ -480,10 +535,10 @@ def _validate_no_room_conflict(booking, room):
         Booking.objects.exclude(pk=booking.pk)
         .filter(
             room=room,
-            status__in=CONFLICT_STATUSES,
             start_time__lt=buffered_end + timedelta(minutes=max(15, room.buffer_before_minutes)),
             end_time__gt=buffered_start - timedelta(minutes=max(15, room.buffer_after_minutes)),
         )
+        .filter(Q(status__in=CONFLICT_STATUSES) | Q(status=DRAFT, hold_expires_at__gt=timezone.now()))
         .exists()
     )
 
@@ -515,6 +570,10 @@ def _validate_no_blackout_conflict(booking, room):
 
 
 def _ensure_room_can_be_booked(booking, room):
+    if room is None:
+        raise ValidationError("Vui lòng chọn phòng trước khi giữ chỗ.")
+    if not booking.participant_count or booking.participant_count < 1:
+        raise ValidationError("Số người tham gia phải lớn hơn 0.")
     if not room.active or not room.building.active or not room.building.campus.active:
         raise ValidationError("Phòng không còn hoạt động.")
 
@@ -669,7 +728,7 @@ def _lock_booking(booking):
         raise ValidationError("Booking phải được lưu trước khi chuyển trạng thái.")
 
     return (
-        Booking.objects.select_for_update()
+        Booking.objects.select_for_update(of=("self",))
         .select_related("room", "created_by")
         .get(pk=booking.pk)
     )

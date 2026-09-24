@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.urls import reverse
@@ -26,13 +26,41 @@ from backend.bookings.services.booking_service import (
 from backend.bookings.tasks import (
     auto_complete_past_bookings,
     auto_expire_unsubmitted_bookings,
+    auto_release_expired_draft_holds,
 )
 
 
 User = get_user_model()
 
 
+def future_weekday():
+    day = timezone.localdate() + timedelta(days=1)
+    while day.weekday() == 6:
+        day += timedelta(days=1)
+    return timezone.make_aware(datetime.combine(day, time(18, 0)))
+
+
 class BookingApiTests(APITestCase):
+    def _future_weekday(self, weekday=None):
+        day = timezone.localdate() + timedelta(days=1)
+        while day.weekday() == 6 or (weekday is not None and day.weekday() != weekday):
+            day += timedelta(days=1)
+        return timezone.make_aware(datetime.combine(day, time(18, 0)))
+
+    def _draft_payload(self, room=True):
+        start = self._future_weekday()
+        return {
+            "room": self.room.id if room else None,
+            "activity_name": "Draft activity",
+            "description": "Draft description",
+            "participant_count": 10,
+            "contact_person": "Representative",
+            "contact_phone": "0900000000",
+            "contact_email": "club@example.com",
+            "start_time": start.isoformat(),
+            "end_time": (start + timedelta(hours=2)).isoformat(),
+        }
+
     def setUp(self):
         self.client = APIClient()
         self.organization = Organization.objects.create(
@@ -74,7 +102,10 @@ class BookingApiTests(APITestCase):
         )
 
     def _booking(self, user=None, organization=None, room=None, start_offset=1):
-        start = timezone.now() + timedelta(days=start_offset)
+        day = timezone.localdate() + timedelta(days=start_offset)
+        if day.weekday() == 6:
+            day += timedelta(days=1)
+        start = timezone.make_aware(datetime.combine(day, time(18, 0)))
         return Booking.objects.create(
             organization=organization or self.organization,
             room=room or self.room,
@@ -105,7 +136,7 @@ class BookingApiTests(APITestCase):
 
     def test_club_can_create_booking_without_supplying_organization(self):
         self.client.force_authenticate(self.user)
-        start = timezone.now() + timedelta(days=2)
+        start = self._future_weekday()
 
         response = self.client.post(
             reverse("booking-list"),
@@ -126,6 +157,92 @@ class BookingApiTests(APITestCase):
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(Booking.objects.get(pk=response.data["id"]).organization, self.organization)
         self.assertEqual(response.data["status"], BookingStatus.PENDING_HOLD)
+
+    def test_draft_without_room_has_no_expiry_and_is_hidden_from_admin_list(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.post(reverse("booking-create-draft"), {"activity_name": "Unfinished"}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        booking = Booking.objects.get(pk=response.data["id"])
+        self.assertEqual(booking.status, BookingStatus.DRAFT)
+        self.assertIsNone(booking.room)
+        self.assertIsNone(booking.hold_expires_at)
+        self.assertEqual([item["id"] for item in self.client.get(reverse("booking-list")).data], [booking.id])
+        admin = User.objects.create_user("draft-admin", password="password", is_staff=True)
+        self.client.force_authenticate(admin)
+        self.assertNotIn(booking.id, [item["id"] for item in self.client.get(reverse("booking-list")).data])
+
+    def test_roomed_draft_holds_for_one_hour_then_releases_room(self):
+        self.client.force_authenticate(self.user)
+        payload = self._draft_payload()
+        response = self.client.post(reverse("booking-create-draft"), payload, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        booking = Booking.objects.get(pk=response.data["id"])
+        self.assertLess(abs((booking.hold_expires_at - timezone.now()).total_seconds() - 3600), 15)
+        original_expiry = booking.hold_expires_at
+        params = {"start_time": payload["start_time"], "end_time": payload["end_time"]}
+        blocked = self.client.get(reverse("room-available"), params)
+        self.assertNotIn(self.room.id, [item["id"] for item in blocked.data])
+        edited = self.client.patch(reverse("booking-detail", args=[booking.id]), {"activity_name": "Edited draft"}, format="json")
+        self.assertEqual(edited.status_code, 200, edited.data)
+        booking.refresh_from_db()
+        self.assertEqual(booking.hold_expires_at, original_expiry)
+        booking.hold_expires_at = timezone.now() - timedelta(seconds=1)
+        booking.save(update_fields=["hold_expires_at"])
+        self.assertEqual(auto_release_expired_draft_holds(), 1)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, BookingStatus.DRAFT)
+        self.assertIsNone(booking.room)
+        self.assertIsNone(booking.hold_expires_at)
+        self.assertIsNotNone(original_expiry)
+        available = self.client.get(reverse("room-available"), params)
+        self.assertIn(self.room.id, [item["id"] for item in available.data])
+
+    def test_draft_can_release_room_without_losing_content(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.post(reverse("booking-create-draft"), self._draft_payload(), format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        booking_id = response.data["id"]
+        updated = self.client.patch(reverse("booking-detail", args=[booking_id]), {"room": None}, format="json")
+        self.assertEqual(updated.status_code, 200, updated.data)
+        booking = Booking.objects.get(pk=booking_id)
+        self.assertIsNone(booking.room)
+        self.assertIsNone(booking.hold_expires_at)
+        self.assertEqual(booking.activity_name, "Draft activity")
+
+    def test_submitting_roomed_draft_uses_normal_submission_deadline(self):
+        self.client.force_authenticate(self.user)
+        created = self.client.post(reverse("booking-create-draft"), self._draft_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        submitted = self.client.patch(reverse("booking-update-and-submit", args=[created.data["id"]]), {}, format="json")
+        self.assertEqual(submitted.status_code, 200, submitted.data)
+        booking = Booking.objects.get(pk=created.data["id"])
+        self.assertEqual(booking.status, BookingStatus.PENDING_HOLD)
+        self.assertGreater((booking.hold_expires_at - timezone.now()).total_seconds(), 47 * 3600)
+
+    def test_second_roomed_draft_cannot_hold_same_room_and_time(self):
+        self.client.force_authenticate(self.user)
+        payload = self._draft_payload()
+        first = self.client.post(reverse("booking-create-draft"), payload, format="json")
+        self.assertEqual(first.status_code, 201, first.data)
+        second = self.client.post(reverse("booking-create-draft"), payload, format="json")
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(Booking.objects.filter(status=BookingStatus.DRAFT).count(), 1)
+
+    def test_rejects_sunday_after_21_and_letters_in_phone(self):
+        self.client.force_authenticate(self.user)
+        sunday = timezone.localdate() + timedelta(days=(6 - timezone.localdate().weekday()) % 7 or 7)
+        sunday_start = timezone.make_aware(datetime.combine(sunday, time(18, 0)))
+        payload = self._draft_payload()
+        payload["start_time"] = sunday_start.isoformat()
+        payload["end_time"] = (sunday_start + timedelta(hours=1)).isoformat()
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
+        weekday = self._future_weekday()
+        payload["start_time"] = weekday.replace(hour=20).isoformat()
+        payload["end_time"] = weekday.replace(hour=21, minute=1).isoformat()
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
+        payload["end_time"] = weekday.replace(hour=21, minute=0).isoformat()
+        payload["contact_phone"] = "0900ABC000"
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
 
     def test_create_conflict_does_not_leave_draft(self):
         held = self._booking()
@@ -234,7 +351,7 @@ class BookingApiTests(APITestCase):
 
     def test_available_rooms_filters_by_capacity(self):
         self.client.force_authenticate(self.user)
-        start = timezone.now() + timedelta(days=3)
+        start = self._future_weekday()
         params = {
             "start_time": start.isoformat(),
             "end_time": (start + timedelta(hours=2)).isoformat(),
@@ -255,7 +372,7 @@ class BookingApiTests(APITestCase):
         booking = self._booking()
         submit_booking(booking, self.user)
         candidate_start = booking.end_time + timedelta(minutes=20)
-        candidate_end = candidate_start + timedelta(hours=1)
+        candidate_end = candidate_start + timedelta(minutes=30)
         self.client.force_authenticate(self.user)
         response = self.client.get(reverse("room-available"), {
             "start_time": candidate_start.isoformat(),
@@ -310,7 +427,7 @@ class BookingApiTests(APITestCase):
         self.assertNotIn(self.room.id, [item["id"] for item in response.data])
 
     def test_available_rooms_respects_blackout_and_buffer(self):
-        start = timezone.now() + timedelta(days=2)
+        start = self._future_weekday()
         RoomBlackout.objects.create(
             scope_type="room",
             room_ids=[self.room.id],
@@ -340,7 +457,7 @@ class BookingApiTests(APITestCase):
         self.assertNotIn(self.room.id, [item["id"] for item in response.data])
 
     def test_available_rooms_excludes_building_blackout(self):
-        start = timezone.now() + timedelta(days=2)
+        start = self._future_weekday()
         RoomBlackout.objects.create(
             scope_type="building",
             room_ids=[],
@@ -518,7 +635,7 @@ class BookingConflictServiceTests(APITestCase):
         )
 
     def test_submit_rejects_overlapping_hold(self):
-        start = timezone.now() + timedelta(days=1)
+        start = future_weekday()
         first = Booking.objects.create(
             organization=self.organization,
             room=self.room,
@@ -586,7 +703,7 @@ class BookingMaintenanceTaskTests(APITestCase):
         )
 
     def test_expire_task_updates_booking_audit_and_notification(self):
-        start = timezone.now() + timedelta(days=1)
+        start = future_weekday()
         booking = Booking.objects.create(
             organization=self.organization,
             room=self.room,

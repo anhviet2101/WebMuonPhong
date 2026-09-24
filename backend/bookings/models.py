@@ -205,7 +205,7 @@ class Booking(models.Model):
         on_delete=models.PROTECT,
         related_name="bookings",
     )
-    room = models.ForeignKey(Room, on_delete=models.PROTECT, related_name="bookings")
+    room = models.ForeignKey(Room, on_delete=models.PROTECT, null=True, blank=True, related_name="bookings")
     secondary_room = models.ForeignKey(
         Room,
         on_delete=models.SET_NULL,
@@ -213,14 +213,14 @@ class Booking(models.Model):
         blank=True,
         related_name="secondary_bookings",
     )
-    activity_name = models.CharField(max_length=255)
-    description = models.TextField()
-    participant_count = models.PositiveIntegerField(validators=[MinValueValidator(1)])
-    contact_person = models.CharField(max_length=255)
-    contact_phone = models.CharField(max_length=30)
-    contact_email = models.EmailField()
-    start_time = models.DateTimeField(db_index=True)
-    end_time = models.DateTimeField(db_index=True)
+    activity_name = models.CharField(max_length=255, blank=True)
+    description = models.TextField(blank=True)
+    participant_count = models.PositiveIntegerField(null=True, blank=True, validators=[MinValueValidator(1)])
+    contact_person = models.CharField(max_length=255, blank=True)
+    contact_phone = models.CharField(max_length=30, blank=True)
+    contact_email = models.EmailField(blank=True)
+    start_time = models.DateTimeField(null=True, blank=True, db_index=True)
+    end_time = models.DateTimeField(null=True, blank=True, db_index=True)
     setup_time_minutes = models.PositiveSmallIntegerField(default=0)
     teardown_time_minutes = models.PositiveSmallIntegerField(default=0)
     equipment_request = models.JSONField(default=dict, blank=True)
@@ -246,7 +246,7 @@ class Booking(models.Model):
         related_name="physical_confirmed_bookings",
     )
     hold_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    during = DateTimeRangeField(editable=False)
+    during = DateTimeRangeField(null=True, blank=True, editable=False)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -264,18 +264,15 @@ class Booking(models.Model):
                     ("room", RangeOperators.EQUAL),
                     ("during", RangeOperators.OVERLAPS),
                 ],
-                condition=Q(
-                    status__in=[
-                        BookingStatus.PENDING_HOLD,
-                        BookingStatus.APPROVED,
-                        BookingStatus.ROOM_CHANGED,
-                    ]
+                condition=(
+                    Q(status__in=[BookingStatus.PENDING_HOLD, BookingStatus.APPROVED, BookingStatus.ROOM_CHANGED])
+                    | Q(status=BookingStatus.DRAFT, hold_expires_at__isnull=False)
                 ),
             ),
         ]
 
     def __str__(self):
-        return f"{self.activity_name} ({self.start_time:%Y-%m-%d %H:%M})"
+        return f"{self.activity_name or 'Bản nháp'} ({self.start_time:%Y-%m-%d %H:%M})" if self.start_time else (self.activity_name or "Bản nháp")
 
     def clean(self):
         super().clean()
@@ -294,10 +291,9 @@ class Booking(models.Model):
             )
 
     def save(self, *args, **kwargs):
-        if self.start_time and self.end_time and self.room_id:
-            self.during = self.get_buffered_time_range()
-            if kwargs.get("update_fields") is not None:
-                kwargs["update_fields"] = set(kwargs["update_fields"]) | {"during"}
+        self.during = self.get_buffered_time_range() if self.start_time and self.end_time and self.room_id else None
+        if kwargs.get("update_fields") is not None:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"during"}
 
         super().save(*args, **kwargs)
 

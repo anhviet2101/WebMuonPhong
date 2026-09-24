@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+import re
 from django.contrib.auth import get_user_model, password_validation
 from rest_framework import serializers
 
@@ -332,6 +333,13 @@ class BookingSerializer(serializers.ModelSerializer):
             )
 
         return attrs
+
+    def validate_contact_phone(self, value):
+        if not value:
+            return value
+        if not re.fullmatch(r"\+?[0-9][0-9 .-]*", value) or not 9 <= len(re.sub(r"\D", "", value)) <= 15:
+            raise serializers.ValidationError("Số điện thoại/Zalo chỉ được dùng chữ số và các dấu +, khoảng trắng, chấm hoặc gạch nối.")
+        return value
 
     def create(self, validated_data):
         request = self.context["request"]

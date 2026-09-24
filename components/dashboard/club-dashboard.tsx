@@ -49,6 +49,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DashboardHeader } from "@/components/shared/dashboard-header";
 import { DateTime24Field, bookingTimeError } from "@/components/shared/date-time-24-field";
+import { DocumentDateField } from "@/components/shared/document-date-field";
 import {
   BookingStatusBadge,
   PhysicalStatusBadge,
@@ -69,14 +70,15 @@ import { useAuth } from "@/components/auth/auth-context";
 import { api, endpoints } from "@/lib/api";
 
 const fmt = (iso: string) =>
-  new Intl.DateTimeFormat("vi-VN", {
+  iso ? new Intl.DateTimeFormat("vi-VN", {
     dateStyle: "short",
     timeStyle: "short",
     hourCycle: "h23",
-  }).format(new Date(iso));
+  }).format(new Date(iso)) : "Chưa chọn thời gian";
 const defaultBookingTime = (hour: number) => {
   const date = new Date();
   date.setDate(date.getDate() + 3);
+  if (date.getDay() === 0) date.setDate(date.getDate() + 1);
   date.setHours(hour, 0, 0, 0);
   return toLocalInput(date.toISOString());
 };
@@ -88,7 +90,8 @@ function HoldCountdown({ expiresAt }: { expiresAt?: string }) {
     const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);
   }, [expiresAt]);
-  if (!expiresAt || remaining <= 0) return <span className="text-xs text-red-600">Hết hạn giữ chỗ</span>;
+  if (!expiresAt) return <span className="text-xs text-slate-500">Chưa giữ phòng</span>;
+  if (remaining <= 0) return <span className="text-xs text-red-600">Hết hạn giữ chỗ</span>;
   const hours = Math.floor(remaining / 3600000);
   const minutes = Math.floor((remaining % 3600000) / 60000);
   const seconds = Math.floor((remaining % 60000) / 1000);
@@ -177,7 +180,10 @@ function BookingFormDialog({
       const duration = previousDuration > 0 && previousDuration < 24 * 60 * 60_000
         ? previousDuration
         : 2 * 60 * 60_000;
-      setEnd(toLocalInput(new Date(nextStart.getTime() + duration).toISOString()));
+      const nextEnd = new Date(nextStart.getTime() + duration);
+      const closing = new Date(nextStart);
+      closing.setHours(21, 0, 0, 0);
+      setEnd(toLocalInput(new Date(Math.min(nextEnd.getTime(), closing.getTime())).toISOString()));
     }
   };
   const loadAvailableRoomIds = async () => {
@@ -245,6 +251,7 @@ function BookingFormDialog({
     if (chosenRoom?.capacity != null && Number(count) > chosenRoom.capacity) nextErrors.count = `Phòng chỉ chứa tối đa ${chosenRoom.capacity} người.`;
     if (!contactPerson.trim()) nextErrors.contactPerson = "Vui lòng nhập người đại diện.";
     if (!contactPhone.trim()) nextErrors.contactPhone = "Vui lòng nhập số điện thoại.";
+    else if (!/^\+?[0-9][0-9 .-]*$/.test(contactPhone) || !/^\d{9,15}$/.test(contactPhone.replace(/\D/g, ""))) nextErrors.contactPhone = "Số điện thoại/Zalo chỉ được nhập chữ số hợp lệ.";
     if (!contactEmail.trim()) nextErrors.contactEmail = "Vui lòng nhập email.";
     else if (!/^\S+@\S+\.\S+$/.test(contactEmail)) nextErrors.contactEmail = "Email chưa hợp lệ.";
     setErrors(nextErrors);
@@ -299,12 +306,35 @@ function BookingFormDialog({
         toast.success("Đã cập nhật đơn");
       } else {
         const b = await store.addBooking(data);
-        toast.success(`${b.id} đã được giữ chỗ trong 48 giờ`);
+        toast.success(`Đơn ${b.id} đã giữ chỗ đến ${b.holdExpiresAt ? new Date(b.holdExpiresAt).toLocaleString("vi-VN") : "thời hạn hệ thống"}`);
         onCreated(b);
       }
       close();
     } catch {
       // The store reports the API error and keeps the form open for correction.
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  const saveDraft = async () => {
+    if (room && timeError) return toast.error(timeError);
+    if (room && !validCount) return toast.error("Số người phải lớn hơn 0 để giữ phòng.");
+    setSubmitting(true);
+    const asIso = (value: string) => Number.isFinite(new Date(value).getTime()) ? new Date(value).toISOString() : "";
+    try {
+      const draft = await store.saveDraft({
+        clubCode: user?.organization?.abbreviation ?? "",
+        clubName: user?.organization?.name ?? user?.organizationName ?? "",
+        activityName: name.trim(), description: description.trim(), roomId: room,
+        backupRoomId: backup === "none" ? undefined : backup,
+        startAt: asIso(start), endAt: asIso(end), participants: Number(count),
+        contactPerson: contactPerson.trim(), contactPhone: contactPhone.trim(),
+        contactEmail: contactEmail.trim(), equipment: [],
+      }, editing?.status === "draft" ? editing.id : undefined);
+      toast.success(draft.roomId ? "Đã lưu bản nháp và giữ phòng tối đa 1 giờ." : "Đã lưu bản nháp; chưa giữ phòng, không giới hạn thời gian.");
+      close();
+    } catch {
+      // Store displays the API error and keeps the form open.
     } finally {
       setSubmitting(false);
     }
@@ -468,7 +498,7 @@ function BookingFormDialog({
                 <Input
                   inputMode="tel"
                   value={contactPhone}
-                  onChange={(e) => setContactPhone(e.target.value)}
+                  onChange={(e) => setContactPhone(e.target.value.replace(/[^0-9+ .-]/g, ""))}
                 />
                 {errors.contactPhone && <p className="text-sm text-red-600">{errors.contactPhone}</p>}
               </div>
@@ -488,6 +518,7 @@ function BookingFormDialog({
           <Button variant="outline" onClick={close}>
             Đóng
           </Button>
+          {(!editing || editing.status === "draft") && <Button variant="outline" onClick={saveDraft} disabled={submitting}>Lưu bản nháp</Button>}
           <Button onClick={submit} disabled={submitting}>{submitting ? "Đang gửi..." : "Gửi đơn"}</Button>
         </DialogFooter>
       </DialogContent>
@@ -626,7 +657,7 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
               <SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="day">Một ngày</SelectItem><SelectItem value="week">Cả tuần (Thứ Hai – Chủ Nhật)</SelectItem></SelectContent>
             </Select>
           </div>
-          <div className="grid gap-2"><Label>Chọn ngày</Label><Input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></div>
+          <div className="grid gap-2"><Label>Chọn ngày</Label><DocumentDateField label="Chọn ngày xuất Mẫu A" value={date} onChange={setDate} /></div>
           <p className="text-sm text-slate-600 sm:col-span-2">Khoảng xuất: {range.from.toLocaleDateString("vi-VN")} – {new Date(range.to.getTime() - 1).toLocaleDateString("vi-VN")}</p>
           <div className="grid gap-2 sm:col-span-2">
             {available.length ? available.map((booking) => (
@@ -661,7 +692,7 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={close}>Đóng</Button>
-          <Button variant="outline" disabled={!selected.length} onClick={() => printMauA(fields)}><Printer /> In đơn</Button>
+          <Button variant="outline" disabled={!selected.length} onClick={() => { if (!printMauA(fields)) toast.error("Trình duyệt đã chặn cửa sổ in. Vui lòng cho phép popup cho trang này."); }}><Printer /> In đơn</Button>
           <Button disabled={!selected.length} onClick={async () => { await exportMauADocx(fields, `Mau-A-${scope}-${date}.docx`); toast.success("Đã tải Mẫu A"); }}><Download /> Tải file .docx</Button>
         </DialogFooter>
       </DialogContent>
@@ -849,7 +880,7 @@ export function ClubDashboard() {
                             </p>
                           </TableCell>
                           <TableCell>
-                            {roomName(b.roomId)}
+                            {b.roomId ? roomName(b.roomId) : "Chưa chọn phòng"}
                             <p className="text-xs text-slate-500">
                               {fmt(b.startAt)}
                             </p>
@@ -859,8 +890,8 @@ export function ClubDashboard() {
                           </TableCell>
                           <TableCell>
                             <BookingStatusBadge status={b.status} />
-                            {b.status === "pending_hold" && (
-                              <p><HoldCountdown expiresAt={b.holdExpiresAt} /></p>
+                            {(b.status === "pending_hold" || b.status === "draft") && (
+                              <p>{b.status === "draft" && !b.roomId ? <span className="text-xs text-slate-500">Chưa giữ phòng · lưu không giới hạn</span> : <HoldCountdown expiresAt={b.holdExpiresAt} />}</p>
                             )}
                           </TableCell>
                           <TableCell>

@@ -6,6 +6,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from backend.bookings.tasks import (
+    auto_release_expired_draft_holds,
     auto_complete_past_bookings,
     auto_expire_unsubmitted_bookings,
 )
@@ -22,5 +23,6 @@ def run_booking_maintenance(request):
         return HttpResponse(status=404)
 
     expired = auto_expire_unsubmitted_bookings()
+    released_drafts = auto_release_expired_draft_holds()
     completed = auto_complete_past_bookings()
-    return JsonResponse({"expired": expired, "completed": completed})
+    return JsonResponse({"expired": expired, "released_drafts": released_drafts, "completed": completed})

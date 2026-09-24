@@ -119,6 +119,10 @@ MAINTENANCE_TOKEN = os.getenv("MAINTENANCE_TOKEN", "")
 if MAINTENANCE_TOKEN and len(MAINTENANCE_TOKEN) < 32:
     raise ImproperlyConfigured("MAINTENANCE_TOKEN must be at least 32 characters long.")
 CELERY_BEAT_SCHEDULE = {
+    "auto-release-expired-draft-holds": {
+        "task": "backend.bookings.tasks.auto_release_expired_draft_holds",
+        "schedule": 60.0,
+    },
     "auto-expire-unsubmitted-bookings": {
         "task": "backend.bookings.tasks.auto_expire_unsubmitted_bookings",
         "schedule": 900.0,
