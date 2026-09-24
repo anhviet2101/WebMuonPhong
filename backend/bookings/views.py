@@ -1,5 +1,6 @@
 
 from copy import copy
+from uuid import uuid4
 import re
 from django.http import HttpResponse
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
@@ -591,6 +592,7 @@ class BookingViewSet(
     def get_permissions(self):
         action_permissions = {
             "create": [IsAuthenticated(), HasPermission("booking.create")],
+            "create_batch": [IsAuthenticated(), HasPermission("booking.create")],
             "create_draft": [IsAuthenticated(), HasPermission("booking.create")],
             "submit": [IsAuthenticated(), HasPermission("booking.create")],
             "update_and_submit": [IsAuthenticated(), HasPermission("booking.create")],
@@ -645,6 +647,33 @@ class BookingViewSet(
         except IntegrityError as exc:
             raise ValidationError("Phòng đã có lịch trùng trong khoảng thời gian này.") from exc
         return Response(self.get_serializer(booking).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"], url_path="batch")
+    def create_batch(self, request):
+        """Create one multi-room request atomically, one collision-safe booking per room."""
+        room_ids = request.data.get("room_ids")
+        if not isinstance(room_ids, list) or not 2 <= len(room_ids) <= 20 or any(type(value) is not int or value < 1 for value in room_ids) or len(set(room_ids)) != len(room_ids):
+            raise ValidationError({"room_ids": "Chọn từ 2 đến 20 phòng khác nhau."})
+        payload = {key: value for key, value in request.data.items() if key != "room_ids"}
+        group = uuid4()
+        bookings = []
+        try:
+            with transaction.atomic():
+                booking_service.release_expired_drafts()
+                for room_id in room_ids:
+                    serializer = self.get_serializer(data={**payload, "room": room_id, "secondary_room": None})
+                    serializer.is_valid(raise_exception=True)
+                    booking = serializer.save()
+                    booking.application_group = group
+                    booking.save(update_fields=["application_group", "updated_at"])
+                    bookings.append(booking_service.submit_booking(booking, request.user))
+        except DjangoValidationError as exc:
+            raise ValidationError(_serialize_django_validation_error(exc)) from exc
+        except DjangoPermissionDenied as exc:
+            raise PermissionDenied(str(exc)) from exc
+        except IntegrityError as exc:
+            raise ValidationError("Một trong các phòng đã có lịch trùng. Không phòng nào được giữ.") from exc
+        return Response(self.get_serializer(bookings, many=True).data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], url_path="drafts")
     def create_draft(self, request):
@@ -841,6 +870,11 @@ class BookingViewSet(
         booking.scan_confirmed_at = None
         booking.scan_confirmed_by = None
         booking.save(update_fields=["scan_data", "scan_content_type", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at", "scan_confirmed_by", "updated_at"])
+        if booking.application_group:
+            Booking.objects.filter(application_group=booking.application_group, status__in=[BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION]).exclude(pk=booking.pk).update(
+                scan_data=content, scan_content_type=mime, scan_file_name=booking.scan_file_name,
+                scan_uploaded_at=booking.scan_uploaded_at, scan_confirmed_at=None, scan_confirmed_by=None,
+            )
         AuditLog.objects.create(user=request.user, action="upload_scan", entity_type="Booking", entity_id=str(booking.pk), new_value={"file_name": booking.scan_file_name})
         return Response(self.get_serializer(booking).data)
 
@@ -852,6 +886,8 @@ class BookingViewSet(
         booking.scan_confirmed_at = timezone.now()
         booking.scan_confirmed_by = request.user
         booking.save(update_fields=["scan_confirmed_at", "scan_confirmed_by", "updated_at"])
+        if booking.application_group:
+            Booking.objects.filter(application_group=booking.application_group, scan_uploaded_at__isnull=False).update(scan_confirmed_at=booking.scan_confirmed_at, scan_confirmed_by=request.user)
         AuditLog.objects.create(user=request.user, action="confirm_scan", entity_type="Booking", entity_id=str(booking.pk))
         return Response(self.get_serializer(booking).data)
 
@@ -864,6 +900,10 @@ class BookingViewSet(
         booking.physical_confirmed_at = timezone.now()
         booking.physical_confirmed_by = request.user
         booking.save(update_fields=["physical_status", "physical_confirmed_at", "physical_confirmed_by", "updated_at"])
+        if booking.application_group:
+            Booking.objects.filter(application_group=booking.application_group, status__in=[BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION]).update(
+                physical_status=booking.physical_status, physical_confirmed_at=booking.physical_confirmed_at, physical_confirmed_by=request.user,
+            )
         AuditLog.objects.create(user=request.user, action="confirm_physical", entity_type="Booking", entity_id=str(booking.pk))
         return Response(self.get_serializer(booking).data)
 
@@ -905,6 +945,8 @@ class BookingViewSet(
         fields = request.data.get("fields")
         if not isinstance(fields, dict) or not isinstance(fields.get("slots"), list) or not fields["slots"]:
             raise ValidationError("Cần chọn ít nhất một đơn để xuất Mẫu A.")
+        if fields.get("headerType", "hsv") not in {"hsv", "doan"}:
+            raise ValidationError({"headerType": "Chọn Hội Sinh viên hoặc Đoàn Thanh niên."})
         ids = [slot.get("bookingId") for slot in fields["slots"] if isinstance(slot, dict)]
         owned = Booking.objects.filter(pk__in=ids)
         if not is_admin(request.user):

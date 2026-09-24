@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DashboardHeader } from "@/components/shared/dashboard-header";
+import { openBookingScan } from "@/components/shared/booking-scan";
 import { DateTime24Field, bookingTimeError } from "@/components/shared/date-time-24-field";
 import { DocumentDateField } from "@/components/shared/document-date-field";
 import {
@@ -138,6 +139,8 @@ function BookingFormDialog({
     ? []
     : buildingRooms.filter((r) => remoteAvailableIds.includes(r.id));
   const [room, setRoom] = useState(editing?.roomId ?? "");
+  const [extraRooms, setExtraRooms] = useState<string[]>([]);
+  const selectedRooms = [room, ...extraRooms].filter(Boolean);
   const [backup, setBackup] = useState(editing?.backupRoomId ?? "none");
   const [name, setName] = useState(editing?.activityName ?? "");
   const [description, setDescription] = useState(editing?.description ?? "");
@@ -220,12 +223,14 @@ function BookingFormDialog({
         if (cancelled) return;
         setRemoteAvailableIds(ids);
         if (room && !ids.includes(room)) setRoom("");
+        setExtraRooms((current) => current.filter((id) => ids.includes(id)));
         if (backup !== "none" && !ids.includes(backup)) setBackup("none");
       })
       .catch(() => {
         if (cancelled) return;
         setRemoteAvailableIds([]);
         setRoom("");
+        setExtraRooms([]);
         setBackup("none");
         toast.error("Không thể kiểm tra phòng khả dụng theo thời gian đã chọn");
       })
@@ -242,6 +247,7 @@ function BookingFormDialog({
     const first = store.buildings.find((b) => b.campusId === value);
     setBuilding(first?.id ?? "");
     setRoom("");
+    setExtraRooms([]);
     setBackup("none");
   };
   const submit = async () => {
@@ -249,12 +255,12 @@ function BookingFormDialog({
     if (timeError) nextErrors.time = timeError;
     if (!campus) nextErrors.campus = "Vui lòng chọn cơ sở.";
     if (!building) nextErrors.building = "Vui lòng chọn tòa nhà.";
-    if (!room) nextErrors.room = "Vui lòng chọn phòng trống.";
+    if (!room) nextErrors.room = "Vui lòng chọn ít nhất một phòng trống.";
     if (!name.trim()) nextErrors.name = "Vui lòng nhập tên hoạt động.";
     if (!description.trim()) nextErrors.description = "Vui lòng nhập mục đích hoặc mô tả.";
     if (!Number.isInteger(Number(count)) || Number(count) < 1) nextErrors.count = "Số người phải là số nguyên lớn hơn 0.";
-    const chosenRoom = store.rooms.find((item) => item.id === room);
-    if (chosenRoom?.capacity != null && Number(count) > chosenRoom.capacity) nextErrors.count = `Phòng chỉ chứa tối đa ${chosenRoom.capacity} người.`;
+    const tooSmall = selectedRooms.map((id) => store.rooms.find((item) => item.id === id)).find((item) => item?.capacity != null && Number(count) > item.capacity);
+    if (tooSmall) nextErrors.count = `Phòng ${tooSmall.name} không đủ sức chứa ${count} người.`;
     if (!contactPerson.trim()) nextErrors.contactPerson = "Vui lòng nhập người đại diện.";
     if (!contactPhone.trim()) nextErrors.contactPhone = "Vui lòng nhập số điện thoại.";
     else if (!/^\+?[0-9][0-9 .-]*$/.test(contactPhone) || !/^\d{9,15}$/.test(contactPhone.replace(/\D/g, ""))) nextErrors.contactPhone = "Số điện thoại/Zalo chỉ được nhập chữ số hợp lệ.";
@@ -287,9 +293,11 @@ function BookingFormDialog({
         }
         toast.success("Đã cập nhật đơn");
       } else {
-        const b = await store.addBooking(data);
-        toast.success(`Đơn ${b.id} đã giữ chỗ đến ${b.holdExpiresAt ? new Date(b.holdExpiresAt).toLocaleString("vi-VN") : "thời hạn hệ thống"}`);
-        onCreated(b);
+        const created = selectedRooms.length > 1
+          ? await store.addBatchBooking(data, selectedRooms)
+          : [await store.addBooking(data)];
+        toast.success(`Đã giữ ${created.length} phòng; hạn nộp scan ${created[0].scanDeadlineAt ? new Date(created[0].scanDeadlineAt).toLocaleString("vi-VN") : "theo hệ thống"}.`);
+        onCreated(created[0]);
       }
       close();
     } catch {
@@ -304,9 +312,9 @@ function BookingFormDialog({
     const monday = new Date();
     monday.setHours(0, 0, 0, 0);
     monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) + 7);
-    const sunday = new Date(monday);
-    sunday.setDate(sunday.getDate() + 6);
-    if (start && (new Date(start) < monday || new Date(start) >= sunday)) next.time = "CLB chỉ đăng ký từ thứ Hai đến thứ Bảy của tuần sau.";
+    const endOfSecondWeek = new Date(monday);
+    endOfSecondWeek.setDate(endOfSecondWeek.getDate() + 13);
+    if (start && (new Date(start) < monday || new Date(start) >= endOfSecondWeek || new Date(start).getDay() === 0)) next.time = "CLB chỉ đăng ký từ thứ Hai đến thứ Bảy của hai tuần kế tiếp.";
     if (!validCount) next.count = "Số người phải là số nguyên lớn hơn 0.";
     if (!name.trim()) next.name = "Vui lòng nhập tên hoạt động.";
     if (!description.trim()) next.description = "Vui lòng nhập mô tả hoạt động.";
@@ -317,6 +325,7 @@ function BookingFormDialog({
     if (!Object.keys(next).length) setStep(2);
   };
   const saveDraft = async () => {
+    if (extraRooms.length) return toast.error("Bản nháp chỉ giữ một phòng. Gửi đơn để đăng ký nhiều phòng cùng lúc.");
     if (room && timeError) return toast.error(timeError);
     if (room && !validCount) return toast.error("Số người phải lớn hơn 0 để giữ phòng.");
     setSubmitting(true);
@@ -395,6 +404,7 @@ function BookingFormDialog({
                 onValueChange={(v) => {
                   setBuilding(v);
                   setRoom("");
+                  setExtraRooms([]);
                   setBackup("none");
                 }}
               >
@@ -412,15 +422,15 @@ function BookingFormDialog({
               {errors.building && <p className="text-sm text-red-600">{errors.building}</p>}
             </div>
             <div className="grid gap-2 sm:col-span-2">
-              <Label>Chọn phòng chính</Label>
-              <p className="text-xs text-slate-600">Xanh: còn trống · Xám: đã bận/không đủ sức chứa · Viền xanh: đã chọn</p>
+              <Label>{editing ? "Đổi phòng cho đơn này" : "Chọn một hoặc nhiều phòng"}</Label>
+              <p className="text-xs text-slate-600">{editing ? "Mỗi dòng đơn đã gửi được chỉnh riêng." : "Ấn từng phòng để chọn hoặc bỏ chọn."} Xanh: còn trống · Xám: đã bận/không đủ sức chứa · Viền xanh: đã chọn.</p>
               {loadingRooms && <p className="text-sm">Đang kiểm tra phòng trống...</p>}
               <div className="grid grid-cols-2 gap-2 rounded-lg border bg-slate-50 p-3 sm:grid-cols-4">
-                {buildingRooms.map((item) => { const free = remoteAvailableIds?.includes(item.id) ?? false; return <button key={item.id} type="button" disabled={!free} onClick={() => { setRoom(item.id); if (backup === item.id) setBackup("none"); }} className={`min-h-20 rounded-lg border-2 px-3 py-2 text-left text-sm transition ${room === item.id ? "border-blue-700 bg-blue-100 text-blue-900" : free ? "border-emerald-300 bg-emerald-50 hover:border-emerald-600" : "cursor-not-allowed border-slate-200 bg-slate-200 text-slate-500"}`}><b className="block">{item.name}</b><span>{free ? "Còn trống" : "Đã bận / không phù hợp"}</span><span className="block text-xs">{item.capacity ?? "?"} người</span></button>; })}
+                {buildingRooms.map((item) => { const free = remoteAvailableIds?.includes(item.id) ?? false; const chosen = selectedRooms.includes(item.id); return <button key={item.id} type="button" disabled={!free} aria-pressed={chosen} onClick={() => { if (editing) { setRoom(item.id); setExtraRooms([]); } else if (chosen) { if (room === item.id) { setRoom(extraRooms[0] ?? ""); setExtraRooms(extraRooms.slice(1)); } else setExtraRooms(extraRooms.filter((id) => id !== item.id)); } else if (!room) setRoom(item.id); else setExtraRooms((current) => [...current, item.id]); if (backup === item.id) setBackup("none"); }} className={`min-h-20 rounded-lg border-2 px-3 py-2 text-left text-sm transition ${chosen ? "border-blue-700 bg-blue-100 text-blue-900" : free ? "border-emerald-300 bg-emerald-50 hover:border-emerald-600" : "cursor-not-allowed border-slate-200 bg-slate-200 text-slate-500"}`}><b className="block">{item.name}</b><span>{chosen ? "Đã chọn" : free ? "Còn trống" : "Đã bận / không phù hợp"}</span><span className="block text-xs">{item.capacity ?? "?"} người</span></button>; })}
               </div>
               {errors.room && <p className="text-sm text-red-600">{errors.room}</p>}
             </div>
-            <div className="grid gap-2">
+            <div className={selectedRooms.length > 1 ? "hidden" : "grid gap-2"}>
               <Label>Phòng dự phòng</Label>
               <Select value={backup} onValueChange={setBackup}>
                 <SelectTrigger className="w-full">
@@ -574,9 +584,9 @@ function BookingDetailDialog({
                 <p className="text-xs text-slate-600">Nộp trước {booking.scanDeadlineAt ? new Date(booking.scanDeadlineAt).toLocaleString("vi-VN") : "hạn do cán bộ đặt"}. Chấp nhận PDF/JPG/PNG tối đa 5 MB.</p>
                 <p className="text-xs text-slate-600">Bản cứng: trước {booking.paperDeadlineAt ? new Date(booking.paperDeadlineAt).toLocaleString("vi-VN") : "hạn do cán bộ đặt"}.</p>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  {booking.scanFileName && <Button size="sm" variant="outline" onClick={async () => { const response = await api.get(`${endpoints.bookings}${booking!.id}/scan/`, { responseType: "blob" }); const url = URL.createObjectURL(response.data); window.open(url, "_blank"); window.setTimeout(() => URL.revokeObjectURL(url), 60_000); }}>Xem bản scan</Button>}
+                  {booking.scanFileName && <Button size="sm" variant="outline" onClick={() => { void openBookingScan(booking!.id).catch(() => toast.error("Không thể mở bản scan.")); }}>Xem bản scan</Button>}
                   {booking.scanUploadedAt && <span className="text-xs text-emerald-700">{booking.scanConfirmedAt ? "Cán bộ đã xác nhận scan" : "Đã tải scan, chờ cán bộ xác nhận"}</span>}
-                  {["pending_hold", "needs_revision"].includes(booking.status) && <Input className="max-w-xs" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" aria-label="Tải bản scan đơn đã ký" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { await store.uploadScan(booking!.id, file); toast.success("Đã tải bản scan."); } catch { /* Store shows the API error. */ } }} />}
+                  {["pending_hold", "needs_revision"].includes(booking.status) && <div className="grid gap-1"><Label htmlFor={`scan-upload-${booking.id}`}>Tải bản scan đơn đã ký</Label><Input id={`scan-upload-${booking.id}`} className="max-w-xs" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" aria-label="Tải bản scan đơn đã ký" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { await store.uploadScan(booking!.id, file); toast.success("Đã tải bản scan."); } catch { /* Store shows the API error. */ } }} /></div>}
                 </div>
               </div>}
               <div>
@@ -617,7 +627,7 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
     const from = new Date(`${date}T00:00:00`);
     if (scope === "week") from.setDate(from.getDate() - ((from.getDay() + 6) % 7));
     const to = new Date(from);
-    to.setDate(to.getDate() + (scope === "week" ? 7 : 1));
+    to.setDate(to.getDate() + (scope === "week" ? 6 : 1));
     return { from, to };
   }, [scope, date]);
   const available = useMemo(() => eligible
@@ -648,10 +658,11 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
         <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-2">
           <div className="grid gap-2"><Label>Phạm vi xuất</Label>
             <Select value={scope} onValueChange={(value) => setScope(value as "day" | "week")}>
-              <SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="day">Một ngày</SelectItem><SelectItem value="week">Cả tuần (Thứ Hai – Chủ Nhật)</SelectItem></SelectContent>
+              <SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="day">Một ngày</SelectItem><SelectItem value="week">Cả tuần (Thứ Hai – Thứ Bảy)</SelectItem></SelectContent>
             </Select>
           </div>
           <div className="grid gap-2"><Label>Chọn ngày</Label><DocumentDateField label="Chọn ngày xuất Mẫu A" value={date} onChange={setDate} /></div>
+          <div className="grid gap-2 sm:col-span-2"><Label>Đơn vị ở đầu mẫu</Label><Select value={fields.headerType} onValueChange={(value) => setFields((current) => ({ ...current, headerType: value as "hsv" | "doan" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="hsv">Hội Sinh viên Trường Đại học Công nghệ</SelectItem><SelectItem value="doan">Đoàn Thanh niên Trường Đại học Công nghệ</SelectItem></SelectContent></Select></div>
           <p className="text-sm text-slate-600 sm:col-span-2">Khoảng xuất: {range.from.toLocaleDateString("vi-VN")} – {new Date(range.to.getTime() - 1).toLocaleDateString("vi-VN")}</p>
           <div className="grid gap-2 sm:col-span-2">
             {available.length ? available.map((booking) => (
@@ -662,16 +673,16 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
             )) : <p className="text-sm text-amber-700">Không có đơn giữ phòng hoặc đã duyệt trong khoảng này.</p>}
           </div>
         </div>
-        <div className="document-preview space-y-3 rounded-lg border bg-white p-6 text-black">
+        <div className="document-preview space-y-3 rounded-lg border bg-white p-6 font-serif text-[14pt] leading-[1.2] text-black">
           <div className="grid gap-4 text-center sm:grid-cols-2">
-            <div><b>{mauAFixed.institution}</b><Input className="mt-2 font-serif text-red-700" aria-label="Tên CLB" value={fields.clubName} onChange={(event) => field("clubName", event.target.value)} /></div>
+            <div><b className="whitespace-pre-line">{fields.headerType === "hsv" ? mauAFixed.institution : "ĐOÀN ĐẠI HỌC QUỐC GIA HÀ NỘI\nBCH TRƯỜNG ĐẠI HỌC CÔNG NGHỆ"}</b><Input className="mt-2 font-serif text-red-700" aria-label="Tên CLB" value={fields.clubName} onChange={(event) => field("clubName", event.target.value)} /></div>
             <div><Label>Ngày lập đơn</Label><Input className="mt-2 font-serif text-red-700" value={fields.issueDate} onChange={(event) => field("issueDate", event.target.value)} /></div>
           </div>
-          <h2 className="text-center text-xl font-bold">{mauAFixed.title}</h2>
+          <h2 className="text-center text-[20pt] font-bold">{mauAFixed.title}</h2>
           <p className="text-center font-bold">{mauAFixed.recipient}</p>
           <textarea className="min-h-24 w-full rounded-md border border-input p-3 font-serif text-red-700" aria-label="Đoạn giới thiệu" value={fields.intro} onChange={(event) => field("intro", event.target.value)} />
           <p>{mauAFixed.request}</p><p className="font-bold">Thời gian, địa điểm:</p>
-          {fields.slots.map((slot, index) => (
+          {fields.slots.length > 1 ? <div className="overflow-x-auto"><table className="w-full border-collapse text-[14pt]"><thead><tr>{["STT", "Thời gian", "Địa điểm", "Đơn vị", "Ghi chú"].map((name) => <th key={name} className="border border-black p-2 text-center font-bold">{name}</th>)}</tr></thead><tbody>{fields.slots.map((slot, index) => <tr key={slot.bookingId}><td className="border border-black p-2 text-center">{index + 1}</td><td className="border border-black p-1"><Input className="font-serif text-red-700" value={slot.time} onChange={(event) => slotField(slot.bookingId, "time", event.target.value)} /></td><td className="border border-black p-1"><Input className="font-serif text-red-700" value={slot.location} onChange={(event) => slotField(slot.bookingId, "location", event.target.value)} /></td><td className="border border-black p-2">{fields.clubName}</td><td className="border border-black p-2" /></tr>)}</tbody></table></div> : fields.slots.map((slot, index) => (
             <div key={slot.bookingId} className="grid gap-2 rounded-md border p-3">
               <label className="grid gap-1 sm:grid-cols-[120px_1fr] sm:items-center"><span>Thời gian {fields.slots.length > 1 ? index + 1 : ""}</span><Input className="font-serif text-red-700" value={slot.time} onChange={(event) => slotField(slot.bookingId, "time", event.target.value)} /></label>
               <label className="grid gap-1 sm:grid-cols-[120px_1fr] sm:items-center"><span>Địa điểm {fields.slots.length > 1 ? index + 1 : ""}</span><Input className="font-serif text-red-700" value={slot.location} onChange={(event) => slotField(slot.bookingId, "location", event.target.value)} /></label>
@@ -679,8 +690,8 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
           ))}
           <label className="grid gap-1 sm:grid-cols-[210px_1fr] sm:items-center"><span>Số lượng người tham gia:</span><Input className="font-serif text-red-700" value={fields.participants} onChange={(event) => field("participants", event.target.value)} /></label>
           <p>{mauAFixed.commitment}</p><p>{mauAFixed.responsibility}</p><p className="whitespace-pre-line">{mauAFixed.closing}</p>
-          <div className="grid gap-3 pt-4 text-center text-sm font-bold sm:grid-cols-3">
-            <span>Ý KIẾN<br />PHÒNG HCQT VÀ TCCB</span><span>Ý KIẾN<br />HỘI SINH VIÊN TRƯỜNG</span>
+          <div className="grid gap-3 pt-4 text-center text-[14pt] font-bold sm:grid-cols-3">
+            <span>Ý KIẾN<br />PHÒNG HCQT VÀ TCCB</span><span>Ý KIẾN<br />{fields.headerType === "hsv" ? "HỘI SINH VIÊN TRƯỜNG" : "ĐOÀN THANH NIÊN TRƯỜNG"}</span>
             <div>TM. BAN CHỦ NHIỆM<Input className="mt-2 font-serif text-red-700" aria-label="Chức danh người ký" value={fields.signerTitle} onChange={(event) => field("signerTitle", event.target.value)} /><Input className="mt-4 font-serif text-red-700" aria-label="Tên người ký" value={fields.signerName} onChange={(event) => field("signerName", event.target.value)} /></div>
           </div>
         </div>
@@ -896,6 +907,7 @@ export function ClubDashboard() {
                             <p className="text-xs text-slate-500">
                               {fmt(b.startAt)}
                             </p>
+                            {b.applicationGroup && <p className="text-xs text-blue-700">Lượt mượn nhiều phòng · {b.applicationGroup.slice(0, 8)}</p>}
                           </TableCell>
                           <TableCell>
                             <PhysicalStatusBadge status={b.physicalStatus} />
@@ -924,6 +936,7 @@ export function ClubDashboard() {
                                 <Download />
                                 Mẫu A
                               </Button>}
+                              {b.scanUploadedAt ? <Button size="sm" variant="outline" onClick={() => { void openBookingScan(b.id).catch(() => toast.error("Không thể mở bản scan.")); }}>Xem scan</Button> : ["pending_hold", "needs_revision"].includes(b.status) ? <Button size="sm" variant="outline" onClick={() => setDetail(b)}>Nộp scan</Button> : null}
                               {[
                                 "draft",
                                 "pending_hold",

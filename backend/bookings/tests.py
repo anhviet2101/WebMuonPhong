@@ -18,6 +18,7 @@ from backend.bookings.models import (
     BookingStatus,
     Building,
     BorrowingPolicy,
+    BusinessRuleConfig,
     Campus,
     Organization,
     Notification,
@@ -48,6 +49,21 @@ User = get_user_model()
 
 
 class OriginalWordTemplateTests(SimpleTestCase):
+    def test_mau_a_multi_room_uses_reference_b_table_and_selected_header(self):
+        slots = [
+            {"bookingId": "1", "time": "Thứ Hai 18h-20h", "location": "Phòng 101"},
+            {"bookingId": "2", "time": "Thứ Hai 18h-20h", "location": "Phòng 102"},
+        ]
+        document = Document(BytesIO(render_mau_a({"headerType": "doan", "clubName": "CLB A", "slots": slots})))
+        self.assertEqual(len(document.tables), 3)
+        self.assertEqual(len(document.tables[1].rows), 3)
+        self.assertEqual(document.tables[1].cell(1, 2).text, "Phòng 101")
+        self.assertEqual(document.tables[1].cell(2, 2).text, "Phòng 102")
+        self.assertTrue(document.tables[1].cell(0, 1).paragraphs[0].runs[0].bold)
+        self.assertTrue(document.tables[0].cell(0, 0).paragraphs[0].runs[0].bold)
+        self.assertIn("BCH TRƯỜNG ĐẠI HỌC CÔNG NGHỆ", document.tables[0].cell(0, 0).text)
+        self.assertEqual(document.tables[2].cell(0, 1).paragraphs[1].text, "ĐOÀN THANH NIÊN TRƯỜNG")
+
     def test_mau_a_keeps_reference_typography_and_commitment(self):
         content = render_mau_a({
             "clubName": "CLB A", "issueDate": "Hà Nội, ngày 24 tháng 9 năm 2026",
@@ -63,6 +79,8 @@ class OriginalWordTemplateTests(SimpleTestCase):
         self.assertEqual(document.sections[0].right_margin, original.sections[0].right_margin)
         self.assertEqual(document.paragraphs[2].runs[0].font.size.pt, 20)
         self.assertEqual(document.paragraphs[3].runs[0].font.size.pt, 14)
+        self.assertTrue(document.paragraphs[6].runs[0].bold)
+        self.assertFalse(document.paragraphs[6].runs[1].bold)
         text = "\n".join(paragraph.text for paragraph in document.paragraphs)
         self.assertNotIn("Cơ sở vật chất:", text)
         self.assertIn("hoàn trả lại thiết bị", text)
@@ -84,6 +102,8 @@ class OriginalWordTemplateTests(SimpleTestCase):
         self.assertEqual(len(document.tables[1].rows), 2)
         self.assertEqual(document.tables[1].cell(0, 0).paragraphs[0].runs[0].font.size.pt, 14)
         self.assertEqual(document.tables[1].cell(1, 3).text, "CLB A")
+        self.assertEqual(document.tables[1].cell(1, 4).paragraphs[0].runs[0].font.size.pt, 14)
+        self.assertNotIn("GĐ Kiều Mai", document.tables[1].cell(1, 2).text)
 
 
 def future_weekday():
@@ -237,6 +257,53 @@ class BookingApiTests(APITestCase):
         BorrowingPolicy.objects.all().delete()
         BorrowingPolicy.objects.create(campus=self.room.building.campus, allowed_weekdays=[1, 2, 3, 4, 5])
         self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
+
+    def test_club_can_book_second_week_but_not_third_week(self):
+        self.client.force_authenticate(self.user)
+        payload = self._draft_payload()
+        start = self._future_weekday(7)
+        payload.update(start_time=start.isoformat(), end_time=(start + timedelta(hours=2)).isoformat())
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 201)
+        BorrowingPolicy.objects.create(campus=self.room.building.campus, locked_weeks=[start.date().isoformat()])
+        locked_payload = {**payload, "room": Room.objects.create(building=self.room.building, name="103", floor=1, capacity=50).id}
+        self.assertEqual(self.client.post(reverse("booking-list"), locked_payload, format="json").status_code, 400)
+        BorrowingPolicy.objects.all().delete()
+        start = self._future_weekday(14)
+        payload.update(start_time=start.isoformat(), end_time=(start + timedelta(hours=2)).isoformat())
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
+
+    def test_multi_room_request_is_atomic_and_one_scan_covers_group(self):
+        second = Room.objects.create(building=self.room.building, name="102", floor=1, capacity=50)
+        BusinessRuleConfig.objects.create(key="max_bookings_per_week_per_org", value=1)
+        self.client.force_authenticate(self.user)
+        payload = {**self._draft_payload(), "room_ids": [self.room.id, second.id]}
+        created = self.client.post(reverse("booking-create-batch"), payload, format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(len(created.data), 2)
+        self.assertEqual(created.data[0]["application_group"], created.data[1]["application_group"])
+        third = Room.objects.create(building=self.room.building, name="103", floor=1, capacity=50)
+        self.assertEqual(self.client.post(reverse("booking-list"), {**self._draft_payload(), "room": third.id}, format="json").status_code, 400)
+        uploaded = self.client.post(reverse("booking-scan", args=[created.data[0]["id"]]), {"file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4\n%%EOF", content_type="application/pdf")}, format="multipart")
+        self.assertEqual(uploaded.status_code, 200, uploaded.data)
+        self.assertIsNotNone(Booking.objects.get(pk=created.data[1]["id"]).scan_uploaded_at)
+        self.assertEqual(self.client.get(reverse("booking-scan", args=[created.data[1]["id"]])).content, b"%PDF-1.4\n%%EOF")
+        self.client.force_authenticate(self.other_user)
+        self.assertEqual(self.client.get(reverse("booking-scan", args=[created.data[0]["id"]])).status_code, 404)
+        admin = User.objects.create_superuser("batch-admin", "batch@example.com", "password")
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.get(reverse("booking-scan", args=[created.data[0]["id"]])).status_code, 200)
+        self.assertEqual(self.client.post(reverse("booking-confirm-scan", args=[created.data[0]["id"]])).status_code, 200)
+        self.assertIsNotNone(Booking.objects.get(pk=created.data[1]["id"]).scan_confirmed_at)
+
+    def test_multi_room_conflict_rolls_back_every_room(self):
+        second = Room.objects.create(building=self.room.building, name="102", floor=1, capacity=50)
+        existing = self._booking(room=second)
+        submit_booking(existing, self.user)
+        self.client.force_authenticate(self.user)
+        payload = {**self._draft_payload(), "room_ids": [self.room.id, second.id]}
+        rejected = self.client.post(reverse("booking-create-batch"), payload, format="json")
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(Booking.objects.count(), 1)
 
     def test_paper_deadline_is_previous_thursday_at_fifteen(self):
         booking_start = self._future_weekday(5)

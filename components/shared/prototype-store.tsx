@@ -89,6 +89,7 @@ export type Booking = {
   scanFileName?: string;
   scanUploadedAt?: string;
   scanConfirmedAt?: string;
+  applicationGroup?: string;
   note?: string;
   createdAt: string;
 };
@@ -176,6 +177,7 @@ type Store = {
   archiveBuilding: (id: string) => Promise<void>;
   restoreBuilding: (id: string) => Promise<void>;
   addBooking: (data: NewBooking) => Promise<Booking>;
+  addBatchBooking: (data: NewBooking, roomIds: string[]) => Promise<Booking[]>;
   saveDraft: (data: NewBooking, id?: string) => Promise<Booking>;
   uploadScan: (id: string, file: File) => Promise<Booking>;
   confirmScan: (id: string) => Promise<Booking>;
@@ -275,6 +277,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     holdExpiresAt: b.hold_expires_at, note: b.notes, createdAt: b.created_at,
     scanDeadlineAt: b.scan_deadline_at, paperDeadlineAt: b.paper_deadline_at,
     scanFileName: b.scan_file_name, scanUploadedAt: b.scan_uploaded_at, scanConfirmedAt: b.scan_confirmed_at,
+    applicationGroup: b.application_group,
   });
   const mapNotification = (n: any): Notification => ({
     id: String(n.id),
@@ -554,6 +557,29 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           throw error;
         }
       },
+      addBatchBooking: async (data, roomIds) => {
+        try {
+          const { data: remote } = await api.post(`${endpoints.bookings}batch/`, {
+            organization: data.clubCode && /^\d+$/.test(data.clubCode) ? Number(data.clubCode) : undefined,
+            room_ids: roomIds.map(Number),
+            activity_name: data.activityName,
+            description: data.description,
+            participant_count: data.participants,
+            contact_person: data.contactPerson,
+            contact_phone: data.contactPhone,
+            contact_email: data.contactEmail,
+            start_time: data.startAt,
+            end_time: data.endAt,
+            equipment_request: {},
+          });
+          const created = (remote as unknown[]).map(mapBooking);
+          setBookings((items) => [...created, ...items]);
+          return created;
+        } catch (error) {
+          showApiError(error, "Không thể đăng ký nhiều phòng");
+          throw error;
+        }
+      },
       saveDraft: async (data, id) => {
         const payload = {
           room: data.roomId ? Number(data.roomId) : null,
@@ -588,20 +614,20 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
         try {
           const { data } = await api.post(`${endpoints.bookings}${id}/scan/`, payload, { headers: { "Content-Type": "multipart/form-data" } });
           const booking = mapBooking(data);
-          setBookings((items) => items.map((item) => item.id === id ? booking : item));
+          setBookings((items) => items.map((item) => item.id === id ? booking : item.applicationGroup && item.applicationGroup === booking.applicationGroup ? { ...item, scanFileName: booking.scanFileName, scanUploadedAt: booking.scanUploadedAt, scanConfirmedAt: undefined } : item));
           return booking;
         } catch (error) { showApiError(error, "Không thể tải bản scan"); throw error; }
       },
       confirmScan: async (id) => {
         const { data } = await api.post(`${endpoints.bookings}${id}/confirm-scan/`);
         const booking = mapBooking(data);
-        setBookings((items) => items.map((item) => item.id === id ? booking : item));
+        setBookings((items) => items.map((item) => item.id === id ? booking : item.applicationGroup && item.applicationGroup === booking.applicationGroup ? { ...item, scanConfirmedAt: booking.scanConfirmedAt } : item));
         return booking;
       },
       confirmPhysical: async (id) => {
         const { data } = await api.post(`${endpoints.bookings}${id}/confirm-physical/`);
         const booking = mapBooking(data);
-        setBookings((items) => items.map((item) => item.id === id ? booking : item));
+        setBookings((items) => items.map((item) => item.id === id ? booking : item.applicationGroup && item.applicationGroup === booking.applicationGroup ? { ...item, physicalStatus: booking.physicalStatus } : item));
         return booking;
       },
       extendDeadlines: async (id, patch) => {

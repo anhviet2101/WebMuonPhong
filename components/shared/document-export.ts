@@ -12,6 +12,7 @@ export type ScheduleRow = {
 
 export type MauASlot = { bookingId: string; time: string; location: string };
 export type MauAFields = {
+  headerType: "hsv" | "doan";
   clubName: string;
   issueDate: string;
   intro: string;
@@ -93,6 +94,7 @@ export function mauAFieldsFromBookings(bookings: Booking[]): MauAFields {
   const descriptions = [...new Set(bookings.map((booking) => booking.description).filter(Boolean))].join(" ");
   const purpose = descriptions.replace(/[.!?\s]+$/u, "") || "sinh hoạt câu lạc bộ";
   return {
+    headerType: "hsv",
     clubName,
     issueDate: dateText(new Date()),
     intro: `Thực hiện kế hoạch trong năm học về kế hoạch công tác sinh hoạt và phổ biến các hoạt động định hướng, ${clubName || "Câu lạc bộ"} tiến hành tổ chức ${activities || "hoạt động"} với mục đích ${purpose}.`,

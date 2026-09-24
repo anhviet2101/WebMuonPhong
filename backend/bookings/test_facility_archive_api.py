@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.urls import reverse
@@ -71,7 +71,10 @@ class FacilityArchiveApiTests(APITestCase):
         self.assertEqual(self.client.delete(reverse("campus-detail", args=[self.campus.pk])).status_code, 204)
         self.assertNotIn(self.building.pk, [item["id"] for item in self.client.get(reverse("building-list")).data])
         self.assertNotIn(self.room.pk, [item["id"] for item in self.client.get(reverse("room-list")).data])
-        start = timezone.now() + timedelta(days=2)
+        day = timezone.localdate() + timedelta(days=2)
+        if day.weekday() == 6:
+            day += timedelta(days=1)
+        start = timezone.make_aware(datetime.combine(day, time(18, 0)))
         self.assertNotIn(self.room, get_available_rooms(start, start + timedelta(hours=1)))
         self.assertEqual(self.client.post(reverse("campus-restore", args=[self.campus.pk])).status_code, 200)
         self.assertIn(self.building.pk, [item["id"] for item in self.client.get(reverse("building-list")).data])

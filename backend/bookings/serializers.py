@@ -284,6 +284,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "campus_id",
             "building_id",
             "created_by_id",
+            "application_group",
             "created_at",
             "updated_at",
         ]
@@ -303,6 +304,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "campus_id",
             "building_id",
             "created_by_id",
+            "application_group",
             "created_at",
             "updated_at",
         ]

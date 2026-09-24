@@ -467,9 +467,9 @@ export function RoomCalendar() {
       const monday = new Date();
       monday.setHours(0, 0, 0, 0);
       monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) + 7);
-      const saturdayEnd = new Date(monday);
-      saturdayEnd.setDate(saturdayEnd.getDate() + 6);
-      if (d < monday || d >= saturdayEnd) return toast.error("CLB chỉ đăng ký từ thứ Hai đến thứ Bảy của tuần sau.");
+      const secondWeekEnd = new Date(monday);
+      secondWeekEnd.setDate(secondWeekEnd.getDate() + 13);
+      if (d < monday || d >= secondWeekEnd) return toast.error("CLB chỉ đăng ký từ thứ Hai đến thứ Bảy của hai tuần kế tiếp.");
     }
     setDraft({ room, start: toLocalInput(d.toISOString()) });
   };

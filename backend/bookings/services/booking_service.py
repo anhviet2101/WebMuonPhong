@@ -33,7 +33,6 @@ SCAN_DEADLINE_HOURS_KEY = "scan_deadline_hours"
 PAPER_CUTOFF_WEEKDAY_KEY = "paper_cutoff_weekday"
 PAPER_CUTOFF_HOUR_KEY = "paper_cutoff_hour"
 MIN_ADVANCE_HOURS_KEY = "min_advance_hours"
-MAX_ADVANCE_DAYS_KEY = "max_advance_days"
 MAX_BOOKING_DURATION_HOURS_KEY = "max_booking_duration_hours"
 MAX_BOOKINGS_PER_WEEK_PER_ORG_KEY = "max_bookings_per_week_per_org"
 LARGE_HALL_MIN_ADVANCE_DAYS_KEY = "large_hall_min_advance_days"
@@ -99,11 +98,12 @@ def validate_club_borrowing_policy(start_time, room, actor=None, policies=None):
     current = timezone.localdate()
     current_monday = current - timedelta(days=current.weekday())
     next_monday = current_monday + timedelta(days=7)
-    if not next_monday <= requested < next_monday + timedelta(days=6):
-        raise ValidationError("CLB chỉ được đăng ký từ thứ Hai đến thứ Bảy của tuần ngay sau tuần hiện tại.")
+    second_week_end = next_monday + timedelta(days=13)
+    if not next_monday <= requested < second_week_end or requested.weekday() == 6:
+        raise ValidationError("CLB chỉ được đăng ký từ thứ Hai đến thứ Bảy của hai tuần kế tiếp.")
     if room is None:
         return
-    week_key = next_monday.isoformat()
+    week_key = (requested - timedelta(days=requested.weekday())).isoformat()
     matching = policies if policies is not None else BorrowingPolicy.objects.filter(campus_id=room.building.campus_id)
     for policy in matching:
         if policy.campus_id != room.building.campus_id or (policy.building_id and policy.building_id != room.building_id) or (policy.room_id and policy.room_id != room.pk):
@@ -550,12 +550,6 @@ def _validate_business_rules(booking, actor=None):
             f"Cần đăng ký trước tối thiểu {min_advance_hours} giờ."
         )
 
-    max_advance_days = _get_business_rule_int(MAX_ADVANCE_DAYS_KEY, 0)
-    if not admin_override and max_advance_days > 0 and booking.start_time > now + timedelta(days=max_advance_days):
-        raise ValidationError(
-            f"Không được đăng ký trước quá {max_advance_days} ngày."
-        )
-
     max_duration_hours = _get_business_rule_int(MAX_BOOKING_DURATION_HOURS_KEY, 0)
     if max_duration_hours > 0:
         duration = booking.end_time - booking.start_time
@@ -569,7 +563,7 @@ def _validate_business_rules(booking, actor=None):
         week_start = booking.start_time - timedelta(days=booking.start_time.weekday())
         week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
         week_end = week_start + timedelta(days=7)
-        weekly_count = (
+        weekly_bookings = (
             Booking.objects.exclude(pk=booking.pk)
             .filter(
                 organization_id=booking.organization_id,
@@ -577,8 +571,10 @@ def _validate_business_rules(booking, actor=None):
                 start_time__gte=week_start,
                 start_time__lt=week_end,
             )
-            .count()
         )
+        if booking.application_group:
+            weekly_bookings = weekly_bookings.exclude(application_group=booking.application_group)
+        weekly_count = weekly_bookings.filter(application_group__isnull=True).count() + weekly_bookings.filter(application_group__isnull=False).values("application_group").distinct().count()
         if weekly_count >= max_weekly:
             raise ValidationError(
                 f"CLB đã đạt tối đa {max_weekly} đơn trong tuần này."

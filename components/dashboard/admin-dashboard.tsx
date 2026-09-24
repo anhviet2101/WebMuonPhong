@@ -57,6 +57,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { DashboardHeader } from "@/components/shared/dashboard-header";
+import { openBookingScan } from "@/components/shared/booking-scan";
 import {
   BookingStatusBadge,
   PhysicalStatusBadge,
@@ -774,7 +775,7 @@ function BorrowingPolicyPanel() {
   };
   return <Card><CardHeader><CardTitle>Ngày cho phép và tuần khóa theo địa điểm</CardTitle></CardHeader><CardContent className="grid gap-5">
     <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-4"><div><Label>Hạn scan sau gửi (giờ)</Label><Input type="number" min="1" max="168" value={scanHours} onChange={(event) => setScanHours(Number(event.target.value))} /></div><div><Label>Hạn giấy: thứ</Label><Select value={String(paperDay)} onValueChange={(value) => setPaperDay(Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Hai", "Ba", "Tư", "Năm", "Sáu", "Bảy"].map((name, index) => <SelectItem key={index} value={String(index)}>Thứ {name}</SelectItem>)}</SelectContent></Select></div><div><Label>Giờ hạn giấy</Label><Input type="number" min="0" max="23" value={paperHour} onChange={(event) => setPaperHour(Number(event.target.value))} /></div><div className="flex items-end"><Button onClick={() => void saveDeadlines()}>Lưu mốc hạn chung</Button></div></div>
-    <p className="text-sm text-slate-600">CLB chỉ đăng ký cho tuần sau (thứ Hai đến thứ Bảy). Quy tắc ở cơ sở, tòa nhà và phòng cùng có hiệu lực; admin vẫn có thể đăng ký hộ khi cần.</p>
+    <p className="text-sm text-slate-600">CLB chỉ đăng ký cho một trong hai tuần kế tiếp (thứ Hai đến thứ Bảy). Quy tắc ở cơ sở, tòa nhà và phòng cùng có hiệu lực; admin vẫn có thể đăng ký hộ khi cần.</p>
     <div className="grid gap-3 md:grid-cols-3">
       <div><Label>Cơ sở</Label><Select value={campusId} onValueChange={(value) => { setCampusId(value); setBuildingId("all"); setRoomId("all"); }}><SelectTrigger><SelectValue placeholder="Chọn cơ sở" /></SelectTrigger><SelectContent>{store.campuses.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
       <div><Label>Tòa nhà / giảng đường</Label><Select value={buildingId} onValueChange={(value) => { setBuildingId(value); setRoomId("all"); }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Toàn cơ sở</SelectItem>{store.buildings.filter((item) => item.campusId === campusId).map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
@@ -1119,6 +1120,7 @@ export function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             {store.rooms.find((r) => r.id === b.roomId)?.name ?? b.roomName}
+                            {b.applicationGroup && <p className="text-xs text-blue-700">Lượt nhiều phòng · {b.applicationGroup.slice(0, 8)}</p>}
                             <p className="text-xs text-slate-500">
                               {fmt(b.startAt)}–{new Date(b.endAt).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}
                             </p>
@@ -1135,7 +1137,8 @@ export function AdminDashboard() {
                             {b.paperDeadlineAt && <p className="mt-1 text-xs text-slate-500">Hạn giấy: {new Date(b.paperDeadlineAt).toLocaleString("vi-VN")}</p>}
                           </TableCell>
                           <TableCell>
-                            <div className="flex gap-2">
+                            <div className="flex flex-wrap gap-2">
+                              {b.scanUploadedAt && <Button size="sm" variant="outline" onClick={() => { void openBookingScan(b.id).catch(() => toast.error("Không thể mở bản scan.")); }}>Xem scan</Button>}
                               <Button size="sm" variant="outline" disabled={!canProcess || !b.scanUploadedAt || Boolean(b.scanConfirmedAt)} onClick={async () => { try { await store.confirmScan(b.id); toast.success("Đã xác nhận bản scan"); } catch { toast.error("Không thể xác nhận bản scan"); } }}>Xác nhận scan</Button>
                               <Button size="sm" variant="outline" disabled={!canProcess || b.physicalStatus === "da_nhan_ban_cung"} onClick={async () => { try { await store.confirmPhysical(b.id); toast.success("Đã ghi nhận bản cứng"); } catch { toast.error("Không thể xác nhận bản cứng"); } }}>Nhận bản cứng</Button>
                               <Button size="sm" disabled={!canApproveStatus || !b.scanConfirmedAt || b.physicalStatus !== "da_nhan_ban_cung"} onClick={async () => { try { await store.updateBooking(b.id, { status: "approved" }); toast.success("Đã duyệt đơn"); } catch { /* Store shows the API error. */ } }}>Duyệt</Button>
@@ -1164,7 +1167,6 @@ export function AdminDashboard() {
                                   >
                                     Đổi phòng
                                   </DropdownMenuItem>
-                                  {b.scanUploadedAt && <DropdownMenuItem onClick={async () => { const response = await api.get(`${endpoints.bookings}${b.id}/scan/`, { responseType: "blob" }); const url = URL.createObjectURL(response.data); window.open(url, "_blank"); window.setTimeout(() => URL.revokeObjectURL(url), 60_000); }}>Xem bản scan</DropdownMenuItem>}
                                   <DropdownMenuItem onClick={() => { setDeadlineBooking(b); setScanDeadline(b.scanDeadlineAt ? toLocalInput(b.scanDeadlineAt) : ""); setPaperDeadline(b.paperDeadlineAt ? toLocalInput(b.paperDeadlineAt) : ""); }}>Gia hạn nộp đơn</DropdownMenuItem>
                                   <DropdownMenuItem
                                     variant="destructive"

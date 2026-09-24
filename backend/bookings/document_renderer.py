@@ -5,9 +5,9 @@ from io import BytesIO
 from pathlib import Path
 
 from docx import Document
+from docx.shared import Pt
 from docx.oxml.ns import qn
 from docx.table import _Row
-from docx.text.paragraph import Paragraph
 
 
 TEMPLATE_DIR = Path(__file__).with_name("document_templates")
@@ -36,6 +36,36 @@ def _set_paragraph(paragraph, value):
         paragraph.add_run(value)
 
 
+def _set_labeled_paragraph(paragraph, label, value):
+    paragraph.clear()
+    title = paragraph.add_run(label)
+    title.bold = True
+    title.font.name = "Times New Roman"
+    title.font.size = Pt(14)
+    detail = paragraph.add_run(str(value or ""))
+    detail.bold = False
+    detail.font.name = "Times New Roman"
+    detail.font.size = Pt(14)
+
+
+def _fill_schedule_table(table, rows):
+    sample_row = deepcopy(table.rows[1]._tr)
+    for row in list(table.rows)[1:]:
+        table._tbl.remove(row._tr)
+    for index, data in enumerate(rows):
+        element = deepcopy(sample_row)
+        table._tbl.append(element)
+        row = _Row(element, table)
+        for cell, value in zip(row.cells, [str(index + 1), data.get("time", ""), data.get("location", ""), data.get("organization", ""), data.get("note", "")]):
+            _set_paragraph(cell.paragraphs[0], value)
+            for run in cell.paragraphs[0].runs:
+                run.font.name = "Times New Roman"
+                run.font.size = Pt(14)
+                run.bold = False
+            for extra_paragraph in cell.paragraphs[1:]:
+                extra_paragraph._p.getparent().remove(extra_paragraph._p)
+
+
 def _save(document):
     output = BytesIO()
     document.save(output)
@@ -49,6 +79,10 @@ def render_mau_a(fields):
     header = doc.tables[0]
     signatures = doc.tables[1]
 
+    institution = "HỘI SINH VIÊN TRƯỜNG ĐẠI HỌC CÔNG NGHỆ" if fields.get("headerType", "hsv") == "hsv" else "ĐOÀN ĐẠI HỌC QUỐC GIA HÀ NỘI\nBCH TRƯỜNG ĐẠI HỌC CÔNG NGHỆ"
+    _set_paragraph(header.cell(0, 0).paragraphs[0], institution)
+    for run in header.cell(0, 0).paragraphs[0].runs:
+        run.bold = True
     _set_paragraph(header.cell(0, 0).paragraphs[1], fields.get("clubName", ""))
     _set_paragraph(header.cell(0, 1).paragraphs[-1], fields.get("issueDate", ""))
     intro = body[4]
@@ -58,25 +92,21 @@ def render_mau_a(fields):
             intro.runs[1].text = " Kính đề nghị Quý phòng xem xét, hỗ trợ cụ thể như sau:"
     slots = fields.get("slots") or []
     time_para, location_para = body[6], body[7]
-    last = location_para._p
-    for index, slot in enumerate(slots):
-        if index:
-            time_xml = deepcopy(time_para._p)
-            location_xml = deepcopy(location_para._p)
-            last.addnext(time_xml)
-            time_xml.addnext(location_xml)
-            last = location_xml
-            time_target = Paragraph(time_xml, time_para._parent)
-            location_target = Paragraph(location_xml, location_para._parent)
-        else:
-            time_target, location_target = time_para, location_para
-        _set_paragraph(time_target, f"Thời gian{f' {index + 1}' if len(slots) > 1 else ''}: {slot.get('time', '')}")
-        _set_paragraph(location_target, f"Địa điểm{f' {index + 1}' if len(slots) > 1 else ''}: {slot.get('location', '')}")
-    if not slots:
-        _set_paragraph(time_para, "Thời gian: ")
-        _set_paragraph(location_para, "Địa điểm: ")
+    if len(slots) > 1:
+        sample = Document(TEMPLATE_DIR / "mau_b.docx")
+        schedule_xml = deepcopy(sample.tables[1]._tbl)
+        body[5]._p.addnext(schedule_xml)
+        schedule = doc.tables[1]
+        _fill_schedule_table(schedule, [{**slot, "organization": fields.get("clubName", ""), "note": slot.get("note", "")} for slot in slots])
+        time_para._p.getparent().remove(time_para._p)
+        location_para._p.getparent().remove(location_para._p)
+    else:
+        slot = slots[0] if slots else {}
+        _set_labeled_paragraph(time_para, "Thời gian: ", slot.get("time", ""))
+        _set_labeled_paragraph(location_para, "Địa điểm: ", slot.get("location", ""))
     body[8]._p.getparent().remove(body[8]._p)  # No equipment request; commitment remains.
-    _set_paragraph(body[9], f"Số lượng người tham gia: {fields.get('participants', '')}")
+    _set_labeled_paragraph(body[9], "Số lượng người tham gia: ", fields.get("participants", ""))
+    _set_paragraph(signatures.cell(0, 1).paragraphs[1], "HỘI SINH VIÊN TRƯỜNG" if fields.get("headerType", "hsv") == "hsv" else "ĐOÀN THANH NIÊN TRƯỜNG")
     signer_cell = signatures.cell(0, 2)
     _set_paragraph(signer_cell.paragraphs[1], fields.get("signerTitle", "CHỦ NHIỆM"))
     _set_paragraph(signer_cell.paragraphs[-1], fields.get("signerName", ""))
@@ -103,15 +133,7 @@ def render_mau_b(rows, template, issue_date):
     _set_paragraph(body[10], closing[0] if closing else "")
     _set_paragraph(body[11], "\n".join(closing[1:]))
 
-    sample_row = deepcopy(schedule.rows[1]._tr)
-    for row in list(schedule.rows)[1:]:
-        schedule._tbl.remove(row._tr)
-    for index, data in enumerate(rows):
-        element = deepcopy(sample_row)
-        schedule._tbl.append(element)
-        row = _Row(element, schedule)
-        for cell, value in zip(row.cells, [str(index + 1), data.get("time", ""), data.get("location", ""), data.get("organization", ""), data.get("note", "")]):
-            _set_paragraph(cell.paragraphs[0], value)
+    _fill_schedule_table(schedule, rows)
 
     left_sign = signatures.cell(0, 0)
     left_lines = str(template.get("leftSignature", "")).splitlines()

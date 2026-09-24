@@ -206,6 +206,7 @@ class Room(models.Model):
 
 
 class Booking(models.Model):
+    application_group = models.UUIDField(null=True, blank=True, db_index=True, editable=False)
     organization = models.ForeignKey(
         Organization,
         on_delete=models.PROTECT,
