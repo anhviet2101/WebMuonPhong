@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { DateTime24Field, bookingTimeError } from "@/components/shared/date-time-24-field";
 import {
   Popover,
   PopoverContent,
@@ -62,9 +63,12 @@ const slots = Array.from(
 const active = ["pending_hold", "approved", "room_changed"];
 const clock = (iso: string) => format(new Date(iso), "HH:mm");
 const iso = (value: string) => new Date(value).toISOString();
-const localMinutes = (value: string) => {
-  const date = new Date(value);
-  return date.getHours() * 60 + date.getMinutes();
+const defaultQuickEnd = (start: string) => {
+  const date = new Date(start);
+  if (!Number.isFinite(date.getTime())) return "";
+  const closing = new Date(date);
+  closing.setHours(END / 60, 0, 0, 0);
+  return toLocalInput(new Date(Math.min(date.getTime() + 60 * 60_000, closing.getTime())).toISOString());
 };
 
 function Event({
@@ -149,49 +153,22 @@ function QuickBooking({
     user?.organization?.contact_email || user?.email || "",
   );
   const [start, setStart] = useState(draft?.start ?? "");
-  const [end, setEnd] = useState(
-    draft
-      ? toLocalInput(
-          (() => {
-            const date = new Date(draft.start);
-            date.setTime(
-              Math.min(
-                date.getTime() + 3600000,
-                new Date(date).setHours(END / 60, 0, 0, 0),
-              ),
-            );
-            return date.toISOString();
-          })(),
-        )
-      : "",
-  );
-  const maxStart = start
-    ? (() => {
-        const date = new Date(start);
-        date.setHours(END / 60 - 1, 30, 0, 0);
-        return toLocalInput(date.toISOString());
-      })()
-    : undefined;
-  const maxEnd = start
-    ? (() => {
-        const date = new Date(start);
-        date.setHours(END / 60, 0, 0, 0);
-        return toLocalInput(date.toISOString());
-      })()
-    : undefined;
+  const [end, setEnd] = useState(draft ? defaultQuickEnd(draft.start) : "");
+  const timeError = bookingTimeError(start, end, { earliestMinute: START, latestMinute: END });
+  const changeStart = (value: string) => {
+    setStart(value);
+    const nextStart = new Date(value);
+    if (!Number.isFinite(nextStart.getTime())) return;
+    if (start.slice(0, 10) !== value.slice(0, 10) || !Number.isFinite(new Date(end).getTime()) || new Date(end) <= nextStart)
+      setEnd(defaultQuickEnd(value));
+  };
   const submit = async () => {
     if (!draft || !name.trim())
       return toast.error("Vui lòng nhập tên hoạt động");
-    if (!start || !end || iso(end) <= iso(start))
-      return toast.error("Khung giờ chưa hợp lệ");
+    if (timeError) return toast.error(timeError);
+    if (new Date(start) <= new Date()) return toast.error("Vui lòng chọn thời gian trong tương lai.");
     if (!contactPerson.trim() || !contactPhone.trim() || !/^\S+@\S+\.\S+$/.test(contactEmail))
       return toast.error("Vui lòng nhập đầy đủ tên, số điện thoại và email liên hệ hợp lệ");
-    if (
-      new Date(start).toDateString() !== new Date(end).toDateString() ||
-      localMinutes(start) > END - SLOT_MINUTES ||
-      localMinutes(end) > END
-    )
-      return toast.error("Thời gian mượn phải kết thúc trước hoặc lúc 21:00");
     try {
       const { data } = await api.get(endpoints.availableRooms, {
         params: { start_time: iso(start), end_time: iso(end) },
@@ -234,25 +211,10 @@ function QuickBooking({
             <Input value={name} onChange={(e) => setName(e.target.value)} />
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="grid gap-2">
-              <Label>Bắt đầu</Label>
-              <Input
-                type="datetime-local"
-                value={start}
-                max={maxStart}
-                onChange={(e) => setStart(e.target.value)}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label>Kết thúc</Label>
-              <Input
-                type="datetime-local"
-                value={end}
-                max={maxEnd}
-                onChange={(e) => setEnd(e.target.value)}
-              />
-            </div>
+            <DateTime24Field label="Bắt đầu" value={start} onChange={changeStart} />
+            <DateTime24Field label="Kết thúc" value={end} onChange={setEnd} />
           </div>
+          {timeError && <p className="text-sm text-red-600">{timeError}</p>}
           <div className="grid gap-2">
             <Label>Số người</Label>
             <Input
@@ -297,7 +259,7 @@ function Blackout({
   const [reason, setReason] = useState("Phục vụ kỳ thi");
   const [note, setNote] = useState("");
   const submit = async () => {
-    if (!room || iso(end) <= iso(start))
+    if (!room || !Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime()) || new Date(end) <= new Date(start))
       return toast.error("Khung khóa chưa hợp lệ");
     await addBlackout({
       roomIds: [room],
@@ -335,22 +297,8 @@ function Blackout({
             </Select>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="grid gap-2">
-              <Label>Bắt đầu</Label>
-              <Input
-                type="datetime-local"
-                value={start}
-                onChange={(e) => setStart(e.target.value)}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label>Kết thúc</Label>
-              <Input
-                type="datetime-local"
-                value={end}
-                onChange={(e) => setEnd(e.target.value)}
-              />
-            </div>
+            <DateTime24Field label="Bắt đầu" value={start} onChange={setStart} />
+            <DateTime24Field label="Kết thúc" value={end} onChange={setEnd} />
           </div>
           <div className="grid gap-2">
             <Label>Lý do</Label>
@@ -484,6 +432,7 @@ export function RoomCalendar() {
       0,
       0,
     );
+    if (d <= new Date()) return toast.error("Vui lòng chọn khung giờ trong tương lai.");
     setDraft({ room, start: toLocalInput(d.toISOString()) });
   };
   return (

@@ -50,6 +50,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DashboardHeader } from "@/components/shared/dashboard-header";
+import { DateTime24Field, bookingTimeError } from "@/components/shared/date-time-24-field";
 import {
   BookingStatusBadge,
   PhysicalStatusBadge,
@@ -79,6 +80,7 @@ const fmt = (iso: string) =>
   new Intl.DateTimeFormat("vi-VN", {
     dateStyle: "short",
     timeStyle: "short",
+    hourCycle: "h23",
   }).format(new Date(iso));
 const defaultBookingTime = (hour: number) => {
   const date = new Date();
@@ -169,7 +171,22 @@ function BookingWizard({
       setBuilding(firstBuilding?.id ?? "");
     }
   }, [campus, editing, editingRoom, editingBuilding, store.campuses, store.buildings]);
-  const validTime = start && end && new Date(end) > new Date(start);
+  const timeError = bookingTimeError(start, end);
+  const validTime = timeError === null;
+  const changeStart = (value: string) => {
+    const previousStart = new Date(start);
+    const nextStart = new Date(value);
+    const currentEnd = new Date(end);
+    setStart(value);
+    if (!Number.isFinite(nextStart.getTime())) return;
+    if (start.slice(0, 10) !== value.slice(0, 10) || !Number.isFinite(currentEnd.getTime()) || currentEnd <= nextStart) {
+      const previousDuration = currentEnd.getTime() - previousStart.getTime();
+      const duration = previousDuration > 0 && previousDuration < 24 * 60 * 60_000
+        ? previousDuration
+        : 2 * 60 * 60_000;
+      setEnd(toLocalInput(new Date(nextStart.getTime() + duration).toISOString()));
+    }
+  };
   const loadAvailableRoomIds = async () => {
     const { data } = await api.get(endpoints.availableRooms, {
       params: {
@@ -219,6 +236,10 @@ function BookingWizard({
     setBackup("none");
   };
   const submit = async () => {
+    if (timeError) {
+      setStep(1);
+      return toast.error(timeError);
+    }
     if (!name.trim() || !room)
       return toast.error("Vui lòng điền tên hoạt động và chọn phòng");
     try {
@@ -302,25 +323,11 @@ function BookingWizard({
         </div>
         {step === 1 && (
           <div className="grid gap-4 sm:grid-cols-2">
-            <div className="grid gap-2">
-              <Label>Bắt đầu</Label>
-              <Input
-                type="datetime-local"
-                value={start}
-                onChange={(e) => setStart(e.target.value)}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label>Kết thúc</Label>
-              <Input
-                type="datetime-local"
-                value={end}
-                onChange={(e) => setEnd(e.target.value)}
-              />
-            </div>
-            {!validTime && (
+            <DateTime24Field label="Bắt đầu" value={start} onChange={changeStart} />
+            <DateTime24Field label="Kết thúc" value={end} onChange={setEnd} />
+            {timeError && (
               <p className="text-sm text-red-600 sm:col-span-2">
-                Giờ kết thúc phải sau giờ bắt đầu.
+                {timeError}
               </p>
             )}
           </div>
@@ -757,6 +764,7 @@ function MauAPreview({ open, close }: { open: boolean; close: () => void }) {
                       {new Date(row.booking.endAt).toLocaleTimeString("vi-VN", {
                         hour: "2-digit",
                         minute: "2-digit",
+                        hourCycle: "h23",
                       })}
                     </TableCell>
                     <TableCell>
