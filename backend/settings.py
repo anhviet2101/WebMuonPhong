@@ -138,6 +138,9 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
+# Render probes this endpoint over the instance's internal HTTP port.
+SECURE_REDIRECT_EXEMPT = [r"^health/$"]
+
 if not DEBUG:
     SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "true").lower() in {
         "1",
