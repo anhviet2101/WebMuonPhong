@@ -141,6 +141,10 @@ function QuickBooking({
 }) {
   const { addBooking } = usePrototypeStore();
   const { user } = useAuth();
+  const admin = Boolean(user && !isClubRole(user.role));
+  const [organizations, setOrganizations] = useState<{ id: number; name: string }[]>([]);
+  const [organizationId, setOrganizationId] = useState("");
+  useEffect(() => { if (admin) void api.get(endpoints.organizations).then(({ data }) => setOrganizations(data.results ?? data)).catch(() => toast.error("Không tải được danh sách đơn vị.")); }, [admin]);
   const [submitting, setSubmitting] = useState(false);
   const [name, setName] = useState("");
   const [count, setCount] = useState("30");
@@ -166,6 +170,7 @@ function QuickBooking({
   const submit = async () => {
     if (!draft || !name.trim())
       return toast.error("Vui lòng nhập tên hoạt động");
+    if (admin && !organizationId) return toast.error("Vui lòng chọn đơn vị được đăng ký hộ.");
     if (timeError) return toast.error(timeError);
     if (new Date(start) <= new Date()) return toast.error("Vui lòng chọn thời gian trong tương lai.");
     if (!contactPerson.trim() || !/^\+?[0-9][0-9 .-]*$/.test(contactPhone) || !/^\d{9,15}$/.test(contactPhone.replace(/\D/g, "")) || !/^\S+@\S+\.\S+$/.test(contactEmail))
@@ -174,7 +179,7 @@ function QuickBooking({
     setSubmitting(true);
     try {
       const b = await addBooking({
-      clubCode: user?.organization?.abbreviation ?? "",
+      clubCode: admin ? organizationId : user?.organization?.abbreviation ?? "",
       clubName: user?.organization?.name ?? user?.organizationName ?? "",
       activityName: name,
       description: "Đăng ký nhanh từ lịch",
@@ -187,7 +192,7 @@ function QuickBooking({
       contactEmail: contactEmail.trim(),
       equipment: [],
       });
-      toast.success(`Đã tạo ${b.id} và giữ chỗ 48 giờ`);
+      toast.success(`Đã tạo đơn ${b.id}; hạn scan và bản cứng hiển thị trong chi tiết đơn.`);
       close();
     } catch {
       // The store displays the server validation error.
@@ -205,6 +210,7 @@ function QuickBooking({
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
+          {admin && <div className="grid gap-2"><Label>Đăng ký hộ đơn vị</Label><Select value={organizationId} onValueChange={setOrganizationId}><SelectTrigger><SelectValue placeholder="Chọn CLB/đơn vị" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.id} value={String(item.id)}>{item.name}</SelectItem>)}</SelectContent></Select></div>}
           <div className="grid gap-2">
             <Label>Tên hoạt động</Label>
             <Input value={name} onChange={(e) => setName(e.target.value)} />
@@ -253,6 +259,8 @@ function Blackout({
   const [selectedBuilding, setSelectedBuilding] = useState(buildingId);
   const list = rooms.filter((r) => r.buildingId === selectedBuilding);
   const [room, setRoom] = useState(list[0]?.id ?? "");
+  const [scope, setScope] = useState<"room" | "floor" | "building">("room");
+  const [floor, setFloor] = useState(1);
   useEffect(() => {
     if (!list.some((item) => item.id === room)) setRoom(list[0]?.id ?? "");
   }, [list, room]);
@@ -263,10 +271,13 @@ function Blackout({
   const [reason, setReason] = useState("Phục vụ kỳ thi");
   const [note, setNote] = useState("");
   const submit = async () => {
-    if (!room || !Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime()) || new Date(end) <= new Date(start))
+    if (!selectedBuilding || (scope === "room" && !room) || !Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime()) || new Date(end) <= new Date(start))
       return toast.error("Khung khóa chưa hợp lệ");
     await addBlackout({
-      roomIds: [room],
+      roomIds: scope === "room" ? [room] : [],
+      scopeType: scope,
+      buildingId: selectedBuilding,
+      floor: scope === "floor" ? floor : undefined,
       startAt: iso(start),
       endAt: iso(end),
       reason,
@@ -279,12 +290,13 @@ function Blackout({
     <Dialog open={open} onOpenChange={(v) => !v && close()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Khóa phòng</DialogTitle>
+          <DialogTitle>Khóa phòng, tầng hoặc tòa nhà</DialogTitle>
           <DialogDescription>
             Block được đồng bộ ngay với lịch dùng chung.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
+          <div className="grid gap-2"><Label>Phạm vi khóa</Label><Select value={scope} onValueChange={(value) => setScope(value as "room" | "floor" | "building")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="room">Một phòng</SelectItem><SelectItem value="floor">Cả tầng</SelectItem><SelectItem value="building">Cả tòa nhà</SelectItem></SelectContent></Select></div>
           <div className="grid gap-2">
             <Label>Cơ sở</Label>
             <Select value={selectedCampus} onValueChange={(value) => { setSelectedCampus(value); setSelectedBuilding(""); setRoom(""); }}>
@@ -299,7 +311,8 @@ function Blackout({
               <SelectContent>{buildings.filter((item) => item.campusId === selectedCampus).map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
             </Select>
           </div>
-          <div className="grid gap-2">
+          {scope === "floor" && <div className="grid gap-2"><Label>Tầng</Label><Select value={String(floor)} onValueChange={(value) => setFloor(Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Array.from(new Set(list.map((item) => item.floor ?? 1))).sort((a, b) => a - b).map((value) => <SelectItem key={value} value={String(value)}>Tầng {value}</SelectItem>)}</SelectContent></Select></div>}
+          {scope === "room" && <div className="grid gap-2">
             <Label>Phòng</Label>
             <Select value={room} onValueChange={setRoom}>
               <SelectTrigger className="w-full">
@@ -313,7 +326,7 @@ function Blackout({
                 ))}
               </SelectContent>
             </Select>
-          </div>
+          </div>}
           <div className="grid gap-3 sm:grid-cols-2">
             <DateTime24Field label="Bắt đầu" value={start} onChange={setStart} />
             <DateTime24Field label="Kết thúc" value={end} onChange={setEnd} />
@@ -450,6 +463,14 @@ export function RoomCalendar() {
     );
     if (d <= new Date()) return toast.error("Vui lòng chọn khung giờ trong tương lai.");
     if (d.getDay() === 0) return toast.error("Không nhận đăng ký mượn phòng vào Chủ nhật.");
+    if (!admin) {
+      const monday = new Date();
+      monday.setHours(0, 0, 0, 0);
+      monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) + 7);
+      const saturdayEnd = new Date(monday);
+      saturdayEnd.setDate(saturdayEnd.getDate() + 6);
+      if (d < monday || d >= saturdayEnd) return toast.error("CLB chỉ đăng ký từ thứ Hai đến thứ Bảy của tuần sau.");
+    }
     setDraft({ room, start: toLocalInput(d.toISOString()) });
   };
   return (
@@ -479,7 +500,7 @@ export function RoomCalendar() {
               {admin && (
                 <Button onClick={() => setBlackout(true)}>
                   <Plus />
-                  Khóa phòng
+                  Khóa lịch
                 </Button>
               )}
             </div>

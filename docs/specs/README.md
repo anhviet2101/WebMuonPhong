@@ -7,6 +7,7 @@ Thư mục này lưu các đặc tả dài hạn cho dự án. Khi code hệ th�
 - `dac-ta-day-du-nguoi-doc-va-vibecode.md`: đặc tả đầy đủ cho người đọc và vibecode, bản Markdown.
 - `he-thong-quan-ly-dang-ky-muon-phong-clb.pdf`: bản PDF gốc của đặc tả hệ thống.
 - `he-thong-quan-ly-dang-ky-muon-phong-clb.txt`: bản trích xuất từ PDF để đọc nhanh và tìm kiếm bằng công cụ code.
+- `cap-nhat-quy-tac-muon-phong-2026-09-24.md`: các quyết định nghiệp vụ được xác nhận sau đặc tả MVP, gồm tuần mượn, hạn scan và bản giấy.
 
 ## Quy Tắc Sử Dụng
 

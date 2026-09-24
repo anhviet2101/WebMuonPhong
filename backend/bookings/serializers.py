@@ -9,6 +9,7 @@ from backend.bookings.models import (
     BookingApproval,
     Building,
     BusinessRuleConfig,
+    BorrowingPolicy,
     Campus,
     DocumentTemplate,
     Notification,
@@ -279,6 +280,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "physical_confirmed_at",
             "physical_confirmed_by",
             "hold_expires_at",
+            "scan_deadline_at", "paper_deadline_at", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at",
             "campus_id",
             "building_id",
             "created_by_id",
@@ -297,6 +299,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "physical_confirmed_at",
             "physical_confirmed_by",
             "hold_expires_at",
+            "scan_deadline_at", "paper_deadline_at", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at",
             "campus_id",
             "building_id",
             "created_by_id",
@@ -309,6 +312,9 @@ class BookingSerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
 
         if request and not is_admin(user):
+            profile = getattr(user, "booking_profile", None)
+            if profile is None or not profile.profile_completed_at:
+                raise serializers.ValidationError("Vui lòng hoàn thiện họ tên, email và số điện thoại/Zalo cá nhân trước khi đăng ký.")
             organization_id = get_user_organization_id(user)
             if organization_id is None:
                 raise serializers.ValidationError(
@@ -392,6 +398,36 @@ class BusinessRuleConfigSerializer(serializers.ModelSerializer):
         model = BusinessRuleConfig
         fields = ["key", "value", "description", "updated_by", "updated_at"]
         read_only_fields = ["updated_by", "updated_at"]
+
+
+class BorrowingPolicySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BorrowingPolicy
+        fields = ["id", "campus", "building", "room", "allowed_weekdays", "locked_weeks", "updated_at"]
+        read_only_fields = ["id", "updated_at"]
+
+    def validate(self, attrs):
+        instance = self.instance
+        campus = attrs.get("campus", getattr(instance, "campus", None))
+        building = attrs.get("building", getattr(instance, "building", None))
+        room = attrs.get("room", getattr(instance, "room", None))
+        weekdays = attrs.get("allowed_weekdays", getattr(instance, "allowed_weekdays", list(range(6))))
+        weeks = attrs.get("locked_weeks", getattr(instance, "locked_weeks", []))
+        if building and building.campus_id != getattr(campus, "id", None):
+            raise serializers.ValidationError({"building": "Tòa nhà không thuộc cơ sở."})
+        if room and (not building or room.building_id != building.id):
+            raise serializers.ValidationError({"room": "Phòng không thuộc tòa nhà."})
+        if not isinstance(weekdays, list) or any(type(day) is not int or day not in range(6) for day in weekdays):
+            raise serializers.ValidationError({"allowed_weekdays": "Chỉ chọn thứ Hai đến thứ Bảy."})
+        if not isinstance(weeks, list):
+            raise serializers.ValidationError({"locked_weeks": "Danh sách tuần khóa không hợp lệ."})
+        from datetime import date
+        try:
+            if any(date.fromisoformat(value).weekday() != 0 for value in weeks):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise serializers.ValidationError({"locked_weeks": "Mỗi tuần khóa phải là ngày thứ Hai dạng YYYY-MM-DD."})
+        return attrs
 
 
 class DocumentTemplateSerializer(serializers.ModelSerializer):

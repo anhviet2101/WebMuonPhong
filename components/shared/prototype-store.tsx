@@ -84,6 +84,11 @@ export type Booking = {
   organizationProfile?: OrganizationProfile;
   hiddenDetails?: boolean;
   holdExpiresAt?: string;
+  scanDeadlineAt?: string;
+  paperDeadlineAt?: string;
+  scanFileName?: string;
+  scanUploadedAt?: string;
+  scanConfirmedAt?: string;
   note?: string;
   createdAt: string;
 };
@@ -151,6 +156,7 @@ type NewBooking = Omit<
   Booking,
   "id" | "status" | "physicalStatus" | "holdExpiresAt" | "createdAt"
 >;
+// Admin-created bookings may be assigned to a club other than the signed-in user.
 type Store = {
   campuses: Campus[];
   archivedCampuses: Campus[];
@@ -171,6 +177,10 @@ type Store = {
   restoreBuilding: (id: string) => Promise<void>;
   addBooking: (data: NewBooking) => Promise<Booking>;
   saveDraft: (data: NewBooking, id?: string) => Promise<Booking>;
+  uploadScan: (id: string, file: File) => Promise<Booking>;
+  confirmScan: (id: string) => Promise<Booking>;
+  confirmPhysical: (id: string) => Promise<Booking>;
+  extendDeadlines: (id: string, patch: { scan_deadline_at?: string; paper_deadline_at?: string }) => Promise<Booking>;
   updateBooking: (id: string, patch: Partial<Booking>) => Promise<void>;
   cancelBooking: (id: string, reason?: string) => Promise<void>;
   addBlackout: (data: Omit<Blackout, "id">) => Promise<void>;
@@ -263,6 +273,8 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     status: b.status, physicalStatus: b.physical_status,
     organizationProfile: b.organization_profile, hiddenDetails: Boolean(b.hidden_details),
     holdExpiresAt: b.hold_expires_at, note: b.notes, createdAt: b.created_at,
+    scanDeadlineAt: b.scan_deadline_at, paperDeadlineAt: b.paper_deadline_at,
+    scanFileName: b.scan_file_name, scanUploadedAt: b.scan_uploaded_at, scanConfirmedAt: b.scan_confirmed_at,
   });
   const mapNotification = (n: any): Notification => ({
     id: String(n.id),
@@ -521,6 +533,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
       addBooking: async (data) => {
         try {
           const { data: remote } = await api.post(endpoints.bookings, {
+            organization: data.clubCode && /^\d+$/.test(data.clubCode) ? Number(data.clubCode) : undefined,
             room: Number(data.roomId),
             secondary_room: data.backupRoomId ? Number(data.backupRoomId) : null,
             activity_name: data.activityName,
@@ -568,6 +581,34 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           showApiError(error, "Không thể lưu bản nháp");
           throw error;
         }
+      },
+      uploadScan: async (id, file) => {
+        const payload = new FormData();
+        payload.append("file", file);
+        try {
+          const { data } = await api.post(`${endpoints.bookings}${id}/scan/`, payload, { headers: { "Content-Type": "multipart/form-data" } });
+          const booking = mapBooking(data);
+          setBookings((items) => items.map((item) => item.id === id ? booking : item));
+          return booking;
+        } catch (error) { showApiError(error, "Không thể tải bản scan"); throw error; }
+      },
+      confirmScan: async (id) => {
+        const { data } = await api.post(`${endpoints.bookings}${id}/confirm-scan/`);
+        const booking = mapBooking(data);
+        setBookings((items) => items.map((item) => item.id === id ? booking : item));
+        return booking;
+      },
+      confirmPhysical: async (id) => {
+        const { data } = await api.post(`${endpoints.bookings}${id}/confirm-physical/`);
+        const booking = mapBooking(data);
+        setBookings((items) => items.map((item) => item.id === id ? booking : item));
+        return booking;
+      },
+      extendDeadlines: async (id, patch) => {
+        const { data } = await api.patch(`${endpoints.bookings}${id}/deadlines/`, patch);
+        const booking = mapBooking(data);
+        setBookings((items) => items.map((item) => item.id === id ? booking : item));
+        return booking;
       },
       updateBooking: async (id, patch) => {
         const action = patch.status === "approved" ? "approve" : patch.status === "rejected" ? "reject" : patch.status === "needs_revision" ? "request-revision" : patch.status === "pending_hold" ? "submit" : undefined;
@@ -620,8 +661,10 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
       addBlackout: async (data) => {
         try {
           const { data: remote } = await api.post(endpoints.blackouts, {
-            scope_type: "room",
+            scope_type: data.scopeType ?? "room",
             room_ids: data.roomIds.map(Number),
+            building: data.buildingId ? Number(data.buildingId) : null,
+            floor: data.floor ?? null,
             start_time: data.startAt,
             end_time: data.endAt,
             reason: data.reason,

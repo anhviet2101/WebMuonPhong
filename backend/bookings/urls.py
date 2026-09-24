@@ -7,6 +7,7 @@ from backend.bookings.views import (
     CampusViewSet,
     AuditLogViewSet,
     BusinessRuleConfigViewSet,
+    BorrowingPolicyViewSet,
     DocumentTemplateViewSet,
     NotificationViewSet,
     OrganizationViewSet,
@@ -30,6 +31,7 @@ router.register("rooms", RoomViewSet, basename="room")
 router.register("bookings", BookingViewSet, basename="booking")
 router.register("blackouts", RoomBlackoutViewSet, basename="blackout")
 router.register("rule-configs", BusinessRuleConfigViewSet, basename="rule-config")
+router.register("borrowing-policies", BorrowingPolicyViewSet, basename="borrowing-policy")
 router.register("document-templates", DocumentTemplateViewSet, basename="document-template")
 router.register("notifications", NotificationViewSet, basename="notification")
 router.register("audit-logs", AuditLogViewSet, basename="audit-log")

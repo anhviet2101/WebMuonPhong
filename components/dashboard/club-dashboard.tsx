@@ -9,7 +9,6 @@ import {
   MoreHorizontal,
   Phone,
   Plus,
-  Printer,
   UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -63,7 +62,6 @@ import {
   exportMauADocx,
   mauAFieldsFromBookings,
   mauAFixed,
-  printMauA,
   type MauAFields,
 } from "@/components/shared/document-export";
 import { useAuth } from "@/components/auth/auth-context";
@@ -77,8 +75,7 @@ const fmt = (iso: string) =>
   }).format(new Date(iso)) : "Chưa chọn thời gian";
 const defaultBookingTime = (hour: number) => {
   const date = new Date();
-  date.setDate(date.getDate() + 3);
-  if (date.getDay() === 0) date.setDate(date.getDate() + 1);
+  date.setDate(date.getDate() + (8 - date.getDay()) % 7 || 7);
   date.setHours(hour, 0, 0, 0);
   return toLocalInput(date.toISOString());
 };
@@ -111,6 +108,7 @@ function BookingFormDialog({
   const store = usePrototypeStore();
   const { user } = useAuth();
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [step, setStep] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const [start, setStart] = useState(
     editing ? toLocalInput(editing.startAt) : defaultBookingTime(18),
@@ -292,6 +290,24 @@ function BookingFormDialog({
       setSubmitting(false);
     }
   };
+  const goToRooms = () => {
+    const next: Record<string, string> = {};
+    if (timeError) next.time = timeError;
+    const monday = new Date();
+    monday.setHours(0, 0, 0, 0);
+    monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) + 7);
+    const sunday = new Date(monday);
+    sunday.setDate(sunday.getDate() + 6);
+    if (start && (new Date(start) < monday || new Date(start) >= sunday)) next.time = "CLB chỉ đăng ký từ thứ Hai đến thứ Bảy của tuần sau.";
+    if (!validCount) next.count = "Số người phải là số nguyên lớn hơn 0.";
+    if (!name.trim()) next.name = "Vui lòng nhập tên hoạt động.";
+    if (!description.trim()) next.description = "Vui lòng nhập mô tả hoạt động.";
+    if (!contactPerson.trim()) next.contactPerson = "Vui lòng nhập người đại diện.";
+    if (!/^\+?[0-9][0-9 .-]*$/.test(contactPhone) || !/^\d{9,15}$/.test(contactPhone.replace(/\D/g, ""))) next.contactPhone = "Số điện thoại/Zalo không hợp lệ.";
+    if (!/^\S+@\S+\.\S+$/.test(contactEmail)) next.contactEmail = "Email không hợp lệ.";
+    setErrors(next);
+    if (!Object.keys(next).length) setStep(2);
+  };
   const saveDraft = async () => {
     if (room && timeError) return toast.error(timeError);
     if (room && !validCount) return toast.error("Số người phải lớn hơn 0 để giữ phòng.");
@@ -323,12 +339,12 @@ function BookingFormDialog({
             {editing ? "Sửa đơn" : "Đăng ký mượn phòng"}
           </DialogTitle>
           <DialogDescription>
-            Điền thông tin trên một màn hình. Hệ thống tính buffer 15 phút trước và sau.
+            {step === 1 ? "Bước 1/2 · Chọn thời gian và điền thông tin hoạt động." : "Bước 2/2 · Chọn phòng trên sơ đồ phòng trống/bận."} Hệ thống tính buffer 15 phút trước và sau.
           </DialogDescription>
         </DialogHeader>
-        <h3 className="font-semibold">Thời gian</h3>
+        <h3 className={step === 1 ? "font-semibold" : "hidden"}>Thời gian</h3>
         {(
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className={step === 1 ? "grid gap-4 sm:grid-cols-2" : "hidden"}>
             <div><DateTime24Field label="Bắt đầu" value={start} onChange={changeStart} />
               {!start && <p className="text-sm text-red-600">Vui lòng chọn ngày và giờ bắt đầu.</p>}</div>
             <div><DateTime24Field label="Kết thúc" value={end} onChange={setEnd} />
@@ -340,14 +356,14 @@ function BookingFormDialog({
             )}
           </div>
         )}
-        <div className="grid gap-2">
+        <div className={step === 1 ? "grid gap-2" : "hidden"}>
           <Label>Số người dự kiến</Label>
           <Input type="number" min={1} value={count} onChange={(e) => setCount(e.target.value)} />
           {errors.count && <p className="text-sm text-red-600">{errors.count}</p>}
         </div>
-        <h3 className="font-semibold">Địa điểm</h3>
+        <h3 className={step === 2 ? "font-semibold" : "hidden"}>Sơ đồ phòng · {new Date(start).toLocaleDateString("vi-VN")} · {start.slice(11)}–{end.slice(11)}</h3>
         {(
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className={step === 2 ? "grid gap-4 sm:grid-cols-2" : "hidden"}>
             <div className="grid gap-2">
               <Label>Cơ sở</Label>
               <Select value={campus} onValueChange={resetBuilding}>
@@ -387,30 +403,13 @@ function BookingFormDialog({
               </Select>
               {errors.building && <p className="text-sm text-red-600">{errors.building}</p>}
             </div>
-            <div className="grid gap-2">
-              <Label>Phòng chính</Label>
-              <Select value={room} onValueChange={(value) => { setRoom(value); if (backup === value) setBackup("none"); }}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Chọn phòng trống" />
-                </SelectTrigger>
-                <SelectContent>
-                  {loadingRooms && (
-                    <SelectItem value="loading" disabled>
-                      Đang kiểm tra phòng trống...
-                    </SelectItem>
-                  )}
-                  {!loadingRooms && remoteAvailableIds !== null && available.length === 0 && (
-                    <SelectItem value="empty" disabled>
-                      Không có phòng trống trong khung giờ này
-                    </SelectItem>
-                  )}
-                  {available.map((r) => (
-                    <SelectItem key={r.id} value={r.id}>
-                      {r.name} · {r.capacity === null ? "Chưa cập nhật sức chứa" : `${r.capacity} người`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="grid gap-2 sm:col-span-2">
+              <Label>Chọn phòng chính</Label>
+              <p className="text-xs text-slate-600">Xanh: còn trống · Xám: đã bận/không đủ sức chứa · Viền xanh: đã chọn</p>
+              {loadingRooms && <p className="text-sm">Đang kiểm tra phòng trống...</p>}
+              <div className="grid grid-cols-2 gap-2 rounded-lg border bg-slate-50 p-3 sm:grid-cols-4">
+                {buildingRooms.map((item) => { const free = remoteAvailableIds?.includes(item.id) ?? false; return <button key={item.id} type="button" disabled={!free} onClick={() => { setRoom(item.id); if (backup === item.id) setBackup("none"); }} className={`min-h-20 rounded-lg border-2 px-3 py-2 text-left text-sm transition ${room === item.id ? "border-blue-700 bg-blue-100 text-blue-900" : free ? "border-emerald-300 bg-emerald-50 hover:border-emerald-600" : "cursor-not-allowed border-slate-200 bg-slate-200 text-slate-500"}`}><b className="block">{item.name}</b><span>{free ? "Còn trống" : "Đã bận / không phù hợp"}</span><span className="block text-xs">{item.capacity ?? "?"} người</span></button>; })}
+              </div>
               {errors.room && <p className="text-sm text-red-600">{errors.room}</p>}
             </div>
             <div className="grid gap-2">
@@ -444,9 +443,9 @@ function BookingFormDialog({
             )}
           </div>
         )}
-        <h3 className="font-semibold">Hoạt động và người liên hệ</h3>
+        <h3 className={step === 1 ? "font-semibold" : "hidden"}>Hoạt động và người liên hệ</h3>
         {(
-          <div className="grid gap-4">
+          <div className={step === 1 ? "grid gap-4" : "hidden"}>
             <div className="grid gap-2">
               <Label>Tên hoạt động</Label>
               <Input value={name} onChange={(e) => setName(e.target.value)} />
@@ -495,7 +494,7 @@ function BookingFormDialog({
             Đóng
           </Button>
           {(!editing || editing.status === "draft") && <Button variant="outline" onClick={saveDraft} disabled={submitting}>Lưu bản nháp</Button>}
-          <Button onClick={submit} disabled={submitting}>{submitting ? "Đang gửi..." : "Gửi đơn"}</Button>
+          {step === 1 ? <Button onClick={goToRooms}>Xem phòng trống</Button> : <><Button variant="outline" onClick={() => setStep(1)}>Quay lại</Button><Button onClick={submit} disabled={submitting}>{submitting ? "Đang gửi..." : "Gửi đơn"}</Button></>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -509,6 +508,7 @@ function BookingDetailDialog({
   close: () => void;
 }) {
   const store = usePrototypeStore();
+  booking = store.bookings.find((item) => item.id === booking?.id) ?? booking;
   const room = booking
     ? store.rooms.find((item) => item.id === booking.roomId)
     : undefined;
@@ -561,6 +561,16 @@ function BookingDetailDialog({
               </div>
             </div>
             <div className="grid gap-2">
+              {booking.status !== "draft" && <div className="rounded-lg border p-3">
+                <p className="font-medium">Bản scan đơn đã ký</p>
+                <p className="text-xs text-slate-600">Nộp trước {booking.scanDeadlineAt ? new Date(booking.scanDeadlineAt).toLocaleString("vi-VN") : "hạn do cán bộ đặt"}. Chấp nhận PDF/JPG/PNG tối đa 5 MB.</p>
+                <p className="text-xs text-slate-600">Bản cứng: trước {booking.paperDeadlineAt ? new Date(booking.paperDeadlineAt).toLocaleString("vi-VN") : "hạn do cán bộ đặt"}.</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {booking.scanFileName && <Button size="sm" variant="outline" onClick={async () => { const response = await api.get(`${endpoints.bookings}${booking!.id}/scan/`, { responseType: "blob" }); const url = URL.createObjectURL(response.data); window.open(url, "_blank"); window.setTimeout(() => URL.revokeObjectURL(url), 60_000); }}>Xem bản scan</Button>}
+                  {booking.scanUploadedAt && <span className="text-xs text-emerald-700">{booking.scanConfirmedAt ? "Cán bộ đã xác nhận scan" : "Đã tải scan, chờ cán bộ xác nhận"}</span>}
+                  {["pending_hold", "needs_revision"].includes(booking.status) && <Input className="max-w-xs" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" aria-label="Tải bản scan đơn đã ký" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { await store.uploadScan(booking!.id, file); toast.success("Đã tải bản scan."); } catch { /* Store shows the API error. */ } }} />}
+                </div>
+              </div>}
               <div>
                 <p className="text-xs font-medium uppercase text-slate-500">Mô tả hoạt động</p>
                 <p className="mt-1 whitespace-pre-wrap text-slate-700">
@@ -668,8 +678,7 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={close}>Đóng</Button>
-          <Button variant="outline" disabled={!selected.length} onClick={() => { if (!printMauA(fields)) toast.error("Trình duyệt đã chặn cửa sổ in. Vui lòng cho phép popup cho trang này."); }}><Printer /> In đơn</Button>
-          <Button disabled={!selected.length} onClick={async () => { await exportMauADocx(fields, `Mau-A-${scope}-${date}.docx`); toast.success("Đã tải Mẫu A"); }}><Download /> Tải file .docx</Button>
+          <Button disabled={!selected.length} onClick={async () => { try { await exportMauADocx(fields, `Mau-A-${scope}-${date}.docx`); toast.success("Đã tải Mẫu A theo file gốc. Mở bằng Word để in đúng định dạng."); } catch { toast.error("Không thể xuất Mẫu A. Vui lòng thử lại."); } }}><Download /> Tải mẫu gốc để in</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

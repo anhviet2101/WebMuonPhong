@@ -9,6 +9,10 @@ from django.db import models
 from django.db.models import Q
 
 
+def default_allowed_weekdays():
+    return [0, 1, 2, 3, 4, 5]
+
+
 class BookingStatus(models.TextChoices):
     DRAFT = "draft", "Draft"
     PENDING_HOLD = "pending_hold", "Pending hold"
@@ -118,6 +122,8 @@ class UserProfile(models.Model):
         related_name="user_profiles",
     )
     must_change_password = models.BooleanField(default=False)
+    phone = models.CharField(max_length=30, blank=True)
+    profile_completed_at = models.DateTimeField(null=True, blank=True)
     archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
     was_active_before_archive = models.BooleanField(default=True)
 
@@ -246,6 +252,17 @@ class Booking(models.Model):
         related_name="physical_confirmed_bookings",
     )
     hold_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    scan_deadline_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    paper_deadline_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    scan_data = models.BinaryField(null=True, blank=True, editable=False)
+    scan_file_name = models.CharField(max_length=255, blank=True)
+    scan_content_type = models.CharField(max_length=100, blank=True)
+    scan_uploaded_at = models.DateTimeField(null=True, blank=True)
+    scan_confirmed_at = models.DateTimeField(null=True, blank=True)
+    scan_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="confirmed_booking_scans",
+    )
     during = DateTimeRangeField(null=True, blank=True, editable=False)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -385,6 +402,26 @@ class BusinessRuleConfig(models.Model):
 
     def __str__(self):
         return self.key
+
+
+class BorrowingPolicy(models.Model):
+    """CLB booking days and closed weeks for a campus/building/room scope."""
+    campus = models.ForeignKey(Campus, on_delete=models.CASCADE, related_name="borrowing_policies")
+    building = models.ForeignKey(Building, on_delete=models.CASCADE, null=True, blank=True, related_name="borrowing_policies")
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, null=True, blank=True, related_name="borrowing_policies")
+    allowed_weekdays = models.JSONField(default=default_allowed_weekdays)
+    locked_weeks = models.JSONField(default=list)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        super().clean()
+        if self.building_id and self.building.campus_id != self.campus_id:
+            raise ValidationError({"building": "Tòa nhà không thuộc cơ sở đã chọn."})
+        if self.room_id and (not self.building_id or self.room.building_id != self.building_id):
+            raise ValidationError({"room": "Phòng không thuộc tòa nhà đã chọn."})
+        if not isinstance(self.allowed_weekdays, list) or any(day not in range(6) for day in self.allowed_weekdays):
+            raise ValidationError({"allowed_weekdays": "Ngày được mượn phải trong khoảng thứ Hai đến thứ Bảy."})
 
 
 class DocumentTemplate(models.Model):

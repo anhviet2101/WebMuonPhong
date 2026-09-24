@@ -11,7 +11,6 @@ import {
   FileWarning,
   MoreHorizontal,
   Plus,
-  Printer,
   Search,
   Settings2,
 } from "lucide-react";
@@ -64,6 +63,7 @@ import {
 } from "@/components/shared/status-badges";
 import {
   usePrototypeStore,
+  toLocalInput,
   type Booking,
   type BookingStatus,
   type Building,
@@ -74,7 +74,6 @@ import {
 } from "@/components/shared/prototype-store";
 import {
   exportScheduleDocx,
-  printSchedule,
   scheduleRowDisplay,
   type ScheduleRow,
 } from "@/components/shared/document-export";
@@ -89,7 +88,7 @@ function ActionDialog({
   action,
   close,
 }: {
-  action: { type: "revision" | "reject" | "room" | "cancel"; booking: Booking } | null;
+  action: { type: "revision" | "room" | "cancel"; booking: Booking } | null;
   close: () => void;
 }) {
   const store = usePrototypeStore();
@@ -171,12 +170,10 @@ function ActionDialog({
     } else {
       if (!reason.trim()) return toast.error("Vui lòng nhập lý do");
       await store.updateBooking(action.booking.id, {
-        status: action.type === "revision" ? "needs_revision" : "rejected",
+        status: "needs_revision",
         note: reason,
       });
-      toast.success(
-        action.type === "revision" ? "Đã gửi yêu cầu sửa" : "Đã từ chối đơn",
-      );
+      toast.success("Đã gửi yêu cầu sửa");
     }
     close();
   };
@@ -187,9 +184,7 @@ function ActionDialog({
           <DialogTitle>
             {action?.type === "revision"
               ? "Yêu cầu CLB sửa"
-              : action?.type === "reject"
-                ? "Từ chối đơn"
-                : action?.type === "cancel"
+              : action?.type === "cancel"
                   ? "Hủy đơn"
                   : "Đổi phòng"}
           </DialogTitle>
@@ -236,7 +231,7 @@ function ActionDialog({
             Hủy
           </Button>
           <Button
-            variant={action?.type === "reject" ? "destructive" : "default"}
+            variant={action?.type === "cancel" ? "destructive" : "default"}
             className={action?.type === "cancel" ? "bg-red-600 hover:bg-red-700" : undefined}
             onClick={submit}
             disabled={action?.type === "room" && (loadingRooms || !room || !availableRoomIds?.includes(room))}
@@ -389,22 +384,16 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
             Đóng
           </Button>
           <Button
-            variant="outline"
-            disabled={!selectedRows.length}
-            onClick={() => { if (!printSchedule(selectedRows, draftTemplate, { issueDate })) toast.error("Trình duyệt đã chặn cửa sổ in. Vui lòng cho phép popup cho trang này."); }}
-          >
-            <Printer />
-            In đơn
-          </Button>
-          <Button
             disabled={!selectedRows.length}
             onClick={async () => {
-              await exportScheduleDocx(selectedRows, `Mau-B-${from}-${to}.docx`, draftTemplate, { issueDate });
-              toast.success("Đã tải Mẫu B tổng hợp");
+              try {
+                await exportScheduleDocx(selectedRows, `Mau-B-${from}-${to}.docx`, draftTemplate, { issueDate });
+                toast.success("Đã tải Mẫu B theo file gốc. Mở bằng Word để in đúng định dạng.");
+              } catch { toast.error("Không thể xuất Mẫu B. Vui lòng thử lại."); }
             }}
           >
             <Download />
-            Tải DOCX
+            Tải mẫu gốc để in
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -738,6 +727,66 @@ function Facility() {
     </div>
   );
 }
+type BorrowingPolicyRecord = { id: number; campus: number; building: number | null; room: number | null; allowed_weekdays: number[]; locked_weeks: string[] };
+
+function BorrowingPolicyPanel() {
+  const store = usePrototypeStore();
+  const [policies, setPolicies] = useState<BorrowingPolicyRecord[]>([]);
+  const [campusId, setCampusId] = useState("");
+  const [buildingId, setBuildingId] = useState("all");
+  const [roomId, setRoomId] = useState("all");
+  const [weekDate, setWeekDate] = useState(dateKey(new Date()));
+  const [days, setDays] = useState<number[]>([0, 1, 2, 3, 4, 5]);
+  const [lockedWeeks, setLockedWeeks] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [scanHours, setScanHours] = useState(24);
+  const [paperDay, setPaperDay] = useState(3);
+  const [paperHour, setPaperHour] = useState(15);
+  useEffect(() => { void api.get(endpoints.borrowingPolicies).then(({ data }) => setPolicies(data.results ?? data)).catch(() => toast.error("Không tải được quy tắc mượn phòng.")); }, []);
+  useEffect(() => { void api.get(endpoints.ruleConfigs).then(({ data }) => { const rows: { key: string; value: number | { value: number } }[] = data.results ?? data; const get = (key: string, fallback: number) => { const raw = rows.find((item) => item.key === key)?.value; return typeof raw === "number" ? raw : raw && typeof raw.value === "number" ? raw.value : fallback; }; setScanHours(get("scan_deadline_hours", 24)); setPaperDay(get("paper_cutoff_weekday", 3)); setPaperHour(get("paper_cutoff_hour", 15)); }).catch(() => {}); }, []);
+  useEffect(() => { if (!campusId && store.campuses[0]) setCampusId(store.campuses[0].id); }, [campusId, store.campuses]);
+  const current = policies.find((item) => String(item.campus) === campusId && (item.building ? String(item.building) : "all") === buildingId && (item.room ? String(item.room) : "all") === roomId);
+  useEffect(() => { setDays(current?.allowed_weekdays ?? [0, 1, 2, 3, 4, 5]); setLockedWeeks(current?.locked_weeks ?? []); }, [current?.id, campusId, buildingId, roomId]);
+  const week = new Date(`${weekDate}T12:00:00`);
+  week.setDate(week.getDate() - ((week.getDay() + 6) % 7));
+  const weekKey = dateKey(week);
+  const save = async (nextDays = days, nextLocks = lockedWeeks) => {
+    if (!campusId) return toast.error("Chọn cơ sở trước khi lưu.");
+    setSaving(true);
+    try {
+      const payload = { campus: Number(campusId), building: buildingId === "all" ? null : Number(buildingId), room: roomId === "all" ? null : Number(roomId), allowed_weekdays: nextDays, locked_weeks: nextLocks };
+      const { data } = current ? await api.patch(`${endpoints.borrowingPolicies}${current.id}/`, payload) : await api.post(endpoints.borrowingPolicies, payload);
+      setPolicies((items) => current ? items.map((item) => item.id === current.id ? data : item) : [...items, data]);
+      setDays(nextDays); setLockedWeeks(nextLocks);
+      toast.success("Đã lưu quy tắc mượn phòng.");
+    } catch { toast.error("Không thể lưu quy tắc. Kiểm tra quyền admin và phạm vi đã chọn."); }
+    finally { setSaving(false); }
+  };
+  const saveDeadlines = async () => {
+    if (!Number.isInteger(scanHours) || scanHours < 1 || scanHours > 168 || paperDay < 0 || paperDay > 5 || paperHour < 0 || paperHour > 23) return toast.error("Mốc thời gian không hợp lệ.");
+    try {
+      for (const [key, value] of [["scan_deadline_hours", scanHours], ["paper_cutoff_weekday", paperDay], ["paper_cutoff_hour", paperHour]] as const) {
+        try { await api.patch(`${endpoints.ruleConfigs}${key}/`, { value }); }
+        catch (error: any) { if (error?.response?.status === 404) await api.post(endpoints.ruleConfigs, { key, value, description: "Cấu hình hạn nộp đơn" }); else throw error; }
+      }
+      toast.success("Đã cập nhật mốc hạn cho các đơn gửi tiếp theo.");
+    } catch { toast.error("Không thể cập nhật mốc hạn."); }
+  };
+  return <Card><CardHeader><CardTitle>Ngày cho phép và tuần khóa theo địa điểm</CardTitle></CardHeader><CardContent className="grid gap-5">
+    <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-4"><div><Label>Hạn scan sau gửi (giờ)</Label><Input type="number" min="1" max="168" value={scanHours} onChange={(event) => setScanHours(Number(event.target.value))} /></div><div><Label>Hạn giấy: thứ</Label><Select value={String(paperDay)} onValueChange={(value) => setPaperDay(Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Hai", "Ba", "Tư", "Năm", "Sáu", "Bảy"].map((name, index) => <SelectItem key={index} value={String(index)}>Thứ {name}</SelectItem>)}</SelectContent></Select></div><div><Label>Giờ hạn giấy</Label><Input type="number" min="0" max="23" value={paperHour} onChange={(event) => setPaperHour(Number(event.target.value))} /></div><div className="flex items-end"><Button onClick={() => void saveDeadlines()}>Lưu mốc hạn chung</Button></div></div>
+    <p className="text-sm text-slate-600">CLB chỉ đăng ký cho tuần sau (thứ Hai đến thứ Bảy). Quy tắc ở cơ sở, tòa nhà và phòng cùng có hiệu lực; admin vẫn có thể đăng ký hộ khi cần.</p>
+    <div className="grid gap-3 md:grid-cols-3">
+      <div><Label>Cơ sở</Label><Select value={campusId} onValueChange={(value) => { setCampusId(value); setBuildingId("all"); setRoomId("all"); }}><SelectTrigger><SelectValue placeholder="Chọn cơ sở" /></SelectTrigger><SelectContent>{store.campuses.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
+      <div><Label>Tòa nhà / giảng đường</Label><Select value={buildingId} onValueChange={(value) => { setBuildingId(value); setRoomId("all"); }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Toàn cơ sở</SelectItem>{store.buildings.filter((item) => item.campusId === campusId).map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
+      <div><Label>Phòng</Label><Select value={roomId} disabled={buildingId === "all"} onValueChange={setRoomId}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Toàn tòa nhà</SelectItem>{store.rooms.filter((item) => item.buildingId === buildingId).map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
+    </div>
+    <div><Label>Ngày được CLB mượn</Label><div className="mt-2 flex flex-wrap gap-3">{["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy"].map((label, day) => <label key={day} className="flex items-center gap-2 rounded border px-3 py-2 text-sm"><input type="checkbox" checked={days.includes(day)} onChange={() => setDays((value) => value.includes(day) ? value.filter((item) => item !== day) : [...value, day].sort())} />{label}</label>)}</div></div>
+    <Button className="w-fit" disabled={saving} onClick={() => void save()}>Lưu ngày cho phép</Button>
+    <div className="flex flex-wrap items-end gap-3 border-t pt-4"><div className="w-56"><Label>Tuần cần khóa/mở</Label><DocumentDateField label="Chọn tuần" value={weekDate} onChange={setWeekDate} /></div><p className="text-sm">Tuần từ {week.toLocaleDateString("vi-VN")}</p><Button variant={lockedWeeks.includes(weekKey) ? "outline" : "destructive"} disabled={saving} onClick={() => void save(days, lockedWeeks.includes(weekKey) ? lockedWeeks.filter((item) => item !== weekKey) : [...lockedWeeks, weekKey])}>{lockedWeeks.includes(weekKey) ? "Mở tuần" : "Khóa tuần"}</Button></div>
+    {lockedWeeks.length > 0 && <p className="text-sm text-slate-600">Tuần đã khóa: {lockedWeeks.map((value) => new Date(`${value}T12:00:00`).toLocaleDateString("vi-VN")).join(", ")}</p>}
+  </CardContent></Card>;
+}
+
 export function AdminDashboard() {
   const store = usePrototypeStore();
   const [search, setSearch] = useState(""),
@@ -752,13 +801,16 @@ export function AdminDashboard() {
     [weekDate, setWeekDate] = useState(dateKey(new Date())),
     [selected, setSelected] = useState<Set<string>>(new Set()),
     [action, setAction] = useState<{
-      type: "revision" | "reject" | "room" | "cancel";
+      type: "revision" | "room" | "cancel";
       booking: Booking;
     } | null>(null),
     [exporting, setExporting] = useState(false),
     [supportOpen, setSupportOpen] = useState(false),
     [templateOpen, setTemplateOpen] = useState(false),
     [clubProfile, setClubProfile] = useState<Booking | null>(null);
+  const [deadlineBooking, setDeadlineBooking] = useState<Booking | null>(null);
+  const [scanDeadline, setScanDeadline] = useState("");
+  const [paperDeadline, setPaperDeadline] = useState("");
   const visibleBookings = useMemo(() => store.bookings.filter((b) => b.status !== "draft"), [store.bookings]);
   const filtered = useMemo(
     () =>
@@ -802,7 +854,12 @@ export function AdminDashboard() {
     ],
     [
       "Chưa nhận bản giấy",
-      visibleBookings.filter((b) => b.physicalStatus === "chua_nhan").length,
+      visibleBookings.filter((b) => ["pending_hold", "needs_revision"].includes(b.status) && b.physicalStatus === "chua_nhan").length,
+      <FileWarning />,
+    ],
+    [
+      "Quá hạn bản cứng · cần liên hệ",
+      visibleBookings.filter((b) => ["pending_hold", "needs_revision"].includes(b.status) && b.physicalStatus === "chua_nhan" && b.paperDeadlineAt && new Date(b.paperDeadlineAt) < new Date()).length,
       <FileWarning />,
     ],
     [
@@ -878,6 +935,7 @@ export function AdminDashboard() {
           <TabsList>
             <TabsTrigger value="bookings">Danh sách đơn</TabsTrigger>
             <TabsTrigger value="weekly">Đơn theo tuần</TabsTrigger>
+            <TabsTrigger value="policies">Quy tắc mượn phòng</TabsTrigger>
             <TabsTrigger value="facilities">Quản lý cơ sở & phòng</TabsTrigger>
           </TabsList>
           <TabsContent value="bookings" className="space-y-4">
@@ -1068,27 +1126,19 @@ export function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <PhysicalStatusBadge status={b.physicalStatus} />
+                            {b.scanUploadedAt ? <p className="mt-1 text-xs text-blue-700">Scan: {b.scanConfirmedAt ? "đã xác nhận" : "chờ xác nhận"}</p> : <p className="mt-1 text-xs text-amber-700">Chưa có bản scan</p>}
+                            {b.paperDeadlineAt && !["cancelled", "expired", "rejected"].includes(b.status) && b.physicalStatus === "chua_nhan" && new Date(b.paperDeadlineAt) < new Date() && <p className="mt-1 text-xs font-medium text-red-600">Quá hạn bản cứng · cần liên hệ CLB</p>}
                           </TableCell>
                           <TableCell>
                             <BookingStatusBadge status={b.status} />
-                            {b.status === "pending_hold" && b.holdExpiresAt && <p className="mt-1 text-xs text-amber-700">Giữ đến {new Date(b.holdExpiresAt).toLocaleString("vi-VN")}</p>}
+                            {b.status === "pending_hold" && b.scanDeadlineAt && <p className="mt-1 text-xs text-amber-700">Hạn scan: {new Date(b.scanDeadlineAt).toLocaleString("vi-VN")}</p>}
+                            {b.paperDeadlineAt && <p className="mt-1 text-xs text-slate-500">Hạn giấy: {new Date(b.paperDeadlineAt).toLocaleString("vi-VN")}</p>}
                           </TableCell>
                           <TableCell>
                             <div className="flex gap-2">
-                              <Button
-                                size="sm"
-                                disabled={!canApproveStatus}
-                                onClick={async () => {
-                                  try {
-                                    await store.updateBooking(b.id, { status: "approved" });
-                                    toast.success("Đã nhận bản cứng và duyệt đơn");
-                                  } catch {
-                                    // Store displays the API error.
-                                  }
-                                }}
-                              >
-                                Nhận bản cứng & duyệt
-                              </Button>
+                              <Button size="sm" variant="outline" disabled={!canProcess || !b.scanUploadedAt || Boolean(b.scanConfirmedAt)} onClick={async () => { try { await store.confirmScan(b.id); toast.success("Đã xác nhận bản scan"); } catch { toast.error("Không thể xác nhận bản scan"); } }}>Xác nhận scan</Button>
+                              <Button size="sm" variant="outline" disabled={!canProcess || b.physicalStatus === "da_nhan_ban_cung"} onClick={async () => { try { await store.confirmPhysical(b.id); toast.success("Đã ghi nhận bản cứng"); } catch { toast.error("Không thể xác nhận bản cứng"); } }}>Nhận bản cứng</Button>
+                              <Button size="sm" disabled={!canApproveStatus || !b.scanConfirmedAt || b.physicalStatus !== "da_nhan_ban_cung"} onClick={async () => { try { await store.updateBooking(b.id, { status: "approved" }); toast.success("Đã duyệt đơn"); } catch { /* Store shows the API error. */ } }}>Duyệt</Button>
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                   <Button size="icon-sm" variant="outline">
@@ -1114,6 +1164,8 @@ export function AdminDashboard() {
                                   >
                                     Đổi phòng
                                   </DropdownMenuItem>
+                                  {b.scanUploadedAt && <DropdownMenuItem onClick={async () => { const response = await api.get(`${endpoints.bookings}${b.id}/scan/`, { responseType: "blob" }); const url = URL.createObjectURL(response.data); window.open(url, "_blank"); window.setTimeout(() => URL.revokeObjectURL(url), 60_000); }}>Xem bản scan</DropdownMenuItem>}
+                                  <DropdownMenuItem onClick={() => { setDeadlineBooking(b); setScanDeadline(b.scanDeadlineAt ? toLocalInput(b.scanDeadlineAt) : ""); setPaperDeadline(b.paperDeadlineAt ? toLocalInput(b.paperDeadlineAt) : ""); }}>Gia hạn nộp đơn</DropdownMenuItem>
                                   <DropdownMenuItem
                                     variant="destructive"
                                     disabled={["cancelled", "rejected", "expired", "completed"].includes(b.status)}
@@ -1121,16 +1173,7 @@ export function AdminDashboard() {
                                       setAction({ type: "cancel", booking: b })
                                     }
                                   >
-                                    Hủy đơn
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem
-                                    variant="destructive"
-                                    disabled={!canProcess}
-                                    onClick={() =>
-                                      setAction({ type: "reject", booking: b })
-                                    }
-                                  >
-                                    Từ chối
+                                    Không cho mượn / hủy đơn
                                   </DropdownMenuItem>
                                 </DropdownMenuContent>
                               </DropdownMenu>
@@ -1165,6 +1208,7 @@ export function AdminDashboard() {
               })}
             </div>
           </TabsContent>
+          <TabsContent value="policies"><BorrowingPolicyPanel /></TabsContent>
           <TabsContent value="facilities">
             <Facility />
           </TabsContent>
@@ -1187,6 +1231,12 @@ export function AdminDashboard() {
         <TemplateDialog open={templateOpen} close={() => setTemplateOpen(false)} />
       )}
       <ClubProfileDialog booking={clubProfile} close={() => setClubProfile(null)} />
+      <Dialog open={!!deadlineBooking} onOpenChange={(open) => !open && setDeadlineBooking(null)}>
+        <DialogContent><DialogHeader><DialogTitle>Gia hạn đơn {deadlineBooking?.id}</DialogTitle><DialogDescription>Chỉ áp dụng cho đơn này. Thay đổi được ghi trong nhật ký.</DialogDescription></DialogHeader>
+          <div className="grid gap-3"><div className="grid gap-2"><Label>Hạn bản scan</Label><Input type="datetime-local" value={scanDeadline} onChange={(event) => setScanDeadline(event.target.value)} /></div><div className="grid gap-2"><Label>Hạn bản cứng</Label><Input type="datetime-local" value={paperDeadline} onChange={(event) => setPaperDeadline(event.target.value)} /></div></div>
+          <DialogFooter><Button variant="outline" onClick={() => setDeadlineBooking(null)}>Đóng</Button><Button onClick={async () => { if (!deadlineBooking || !scanDeadline || !paperDeadline) return toast.error("Chọn đủ hai hạn nộp."); try { await store.extendDeadlines(deadlineBooking.id, { scan_deadline_at: new Date(scanDeadline).toISOString(), paper_deadline_at: new Date(paperDeadline).toISOString() }); setDeadlineBooking(null); toast.success("Đã cập nhật hạn nộp."); } catch { toast.error("Không thể cập nhật hạn nộp."); } }}>Lưu hạn nộp</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
     </main>
   );
 }

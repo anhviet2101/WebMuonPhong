@@ -1,10 +1,13 @@
 from datetime import datetime, time, timedelta
+from io import BytesIO
 from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError
 from django.db import connection
-from django.test import override_settings
+from django.test import override_settings, SimpleTestCase
+from docx import Document
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
@@ -14,6 +17,7 @@ from backend.bookings.models import (
     Booking,
     BookingStatus,
     Building,
+    BorrowingPolicy,
     Campus,
     Organization,
     Notification,
@@ -27,12 +31,15 @@ from backend.bookings.services.booking_service import (
     approve_booking,
     change_room,
     get_available_rooms,
+    paper_deadline_for,
     submit_booking,
 )
+from backend.bookings.document_renderer import TEMPLATE_DIR, render_mau_a, render_mau_b
 from backend.bookings.tasks import (
     auto_complete_past_bookings,
     auto_expire_unsubmitted_bookings,
     auto_release_expired_draft_holds,
+    warn_overdue_physical_copies,
     send_booking_notification_emails,
 )
 
@@ -40,18 +47,55 @@ from backend.bookings.tasks import (
 User = get_user_model()
 
 
+class OriginalWordTemplateTests(SimpleTestCase):
+    def test_mau_a_keeps_reference_typography_and_commitment(self):
+        content = render_mau_a({
+            "clubName": "CLB A", "issueDate": "Hà Nội, ngày 24 tháng 9 năm 2026",
+            "intro": "CLB A tổ chức sinh hoạt.", "participants": "30 người",
+            "signerTitle": "CHỦ NHIỆM", "signerName": "Nguyễn Văn A",
+            "slots": [{"time": "18h00 - 20h00", "location": "Phòng 101"}],
+        })
+        document = Document(BytesIO(content))
+        original = Document(TEMPLATE_DIR / "mau_a.docx")
+        self.assertEqual(document.sections[0].page_width, original.sections[0].page_width)
+        self.assertEqual(document.sections[0].page_height, original.sections[0].page_height)
+        self.assertEqual(document.sections[0].left_margin.twips, round(float(original.sections[0]._sectPr.pgMar.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}left"))))
+        self.assertEqual(document.sections[0].right_margin, original.sections[0].right_margin)
+        self.assertEqual(document.paragraphs[2].runs[0].font.size.pt, 20)
+        self.assertEqual(document.paragraphs[3].runs[0].font.size.pt, 14)
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertNotIn("Cơ sở vật chất:", text)
+        self.assertIn("hoàn trả lại thiết bị", text)
+        self.assertEqual(len(document.tables), 2)
+
+    def test_mau_b_preserves_five_columns_and_fourteen_point_header(self):
+        content = render_mau_b(
+            [{"time": "18h00 - 20h00", "location": "Phòng 101", "organization": "CLB A", "note": ""}],
+            {"leftHeader": "ĐOÀN ĐHQGHN\nBCH TRƯỜNG ĐHCN\n***", "rightHeader": "ĐOÀN TNCS HỒ CHÍ MINH", "title": "ĐƠN ĐỀ NGHỊ", "recipient": "Kính gửi: Phòng HCQT", "intro": "Đề nghị mượn phòng.", "commitment": "Cam kết trả phòng.", "closing": "Xin cảm ơn!", "leftSignature": "Ý KIẾN\nPHÒNG HCQT", "rightSignature": "TM. BCH ĐOÀN TRƯỜNG\nUV BAN THƯỜNG VỤ", "rightSignerName": "Nguyễn Thị Hằng"},
+            "Hà Nội, ngày 24 tháng 9 năm 2026",
+        )
+        document = Document(BytesIO(content))
+        original = Document(TEMPLATE_DIR / "mau_b.docx")
+        self.assertEqual(document.sections[0].page_width, original.sections[0].page_width)
+        self.assertEqual(document.sections[0].page_height, original.sections[0].page_height)
+        self.assertEqual(document.sections[0].top_margin, original.sections[0].top_margin)
+        self.assertEqual(document.sections[0].bottom_margin, original.sections[0].bottom_margin)
+        self.assertEqual(len(document.tables[1].columns), 5)
+        self.assertEqual(len(document.tables[1].rows), 2)
+        self.assertEqual(document.tables[1].cell(0, 0).paragraphs[0].runs[0].font.size.pt, 14)
+        self.assertEqual(document.tables[1].cell(1, 3).text, "CLB A")
+
+
 def future_weekday():
-    day = timezone.localdate() + timedelta(days=1)
-    while day.weekday() == 6:
-        day += timedelta(days=1)
+    today = timezone.localdate()
+    day = today - timedelta(days=today.weekday()) + timedelta(days=7)
     return timezone.make_aware(datetime.combine(day, time(18, 0)))
 
 
 class BookingApiTests(APITestCase):
     def _future_weekday(self, weekday=None):
-        day = timezone.localdate() + timedelta(days=1)
-        while day.weekday() == 6 or (weekday is not None and day.weekday() != weekday):
-            day += timedelta(days=1)
+        today = timezone.localdate()
+        day = today - timedelta(days=today.weekday()) + timedelta(days=7 + (weekday or 0))
         return timezone.make_aware(datetime.combine(day, time(18, 0)))
 
     def _draft_payload(self, room=True):
@@ -81,17 +125,19 @@ class BookingApiTests(APITestCase):
             type="club",
         )
         self.role = Role.objects.get(name="CLB_REP")
-        self.user = User.objects.create_user("club-a", password="password")
-        self.other_user = User.objects.create_user("club-b", password="password")
+        self.user = User.objects.create_user("club-a", password="password", first_name="Club", last_name="A", email="a@example.com")
+        self.other_user = User.objects.create_user("club-b", password="password", first_name="Club", last_name="B", email="b@example.com")
         UserProfile.objects.create(
             user=self.user,
             role=self.role,
             organization=self.organization,
+            phone="0900000000", profile_completed_at=timezone.now(),
         )
         UserProfile.objects.create(
             user=self.other_user,
             role=self.role,
             organization=self.other_organization,
+            phone="0900000001", profile_completed_at=timezone.now(),
         )
 
         campus = Campus.objects.create(name="Campus 1", code="C1")
@@ -109,9 +155,8 @@ class BookingApiTests(APITestCase):
         )
 
     def _booking(self, user=None, organization=None, room=None, start_offset=1):
-        day = timezone.localdate() + timedelta(days=start_offset)
-        if day.weekday() == 6:
-            day += timedelta(days=1)
+        today = timezone.localdate()
+        day = today - timedelta(days=today.weekday()) + timedelta(days=7 + start_offset - 1)
         start = timezone.make_aware(datetime.combine(day, time(18, 0)))
         return Booking.objects.create(
             organization=organization or self.organization,
@@ -164,6 +209,66 @@ class BookingApiTests(APITestCase):
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(Booking.objects.get(pk=response.data["id"]).organization, self.organization)
         self.assertEqual(response.data["status"], BookingStatus.PENDING_HOLD)
+
+    def test_club_must_complete_profile_before_creating_booking(self):
+        UserProfile.objects.filter(user=self.user).update(profile_completed_at=None)
+        self.user.refresh_from_db()
+        self.user.booking_profile.refresh_from_db()
+        self.client.force_authenticate(self.user)
+        response = self.client.post(reverse("booking-list"), self._draft_payload(), format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Booking.objects.count(), 0)
+
+    def test_club_can_only_book_next_week_and_respects_location_policy(self):
+        self.client.force_authenticate(self.user)
+        payload = self._draft_payload()
+        earlier = timezone.localdate() + timedelta(days=1)
+        if earlier.weekday() == 6:
+            earlier += timedelta(days=1)
+        if timezone.localdate().weekday() == 6:
+            earlier += timedelta(days=7)
+        payload["start_time"] = timezone.make_aware(datetime.combine(earlier, time(18))).isoformat()
+        payload["end_time"] = timezone.make_aware(datetime.combine(earlier, time(20))).isoformat()
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
+        payload = self._draft_payload()
+        monday = self._future_weekday().date()
+        BorrowingPolicy.objects.create(campus=self.room.building.campus, locked_weeks=[monday.isoformat()])
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
+        BorrowingPolicy.objects.all().delete()
+        BorrowingPolicy.objects.create(campus=self.room.building.campus, allowed_weekdays=[1, 2, 3, 4, 5])
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
+
+    def test_paper_deadline_is_previous_thursday_at_fifteen(self):
+        booking_start = self._future_weekday(5)
+        deadline = timezone.localtime(paper_deadline_for(booking_start))
+        expected = timezone.localtime(booking_start).date() - timedelta(days=9)
+        self.assertEqual(deadline.date(), expected)
+        self.assertEqual((deadline.hour, deadline.minute), (15, 0))
+
+    def test_admin_can_register_on_behalf_even_when_club_week_is_locked(self):
+        monday = self._future_weekday().date()
+        BorrowingPolicy.objects.create(campus=self.room.building.campus, locked_weeks=[monday.isoformat()])
+        admin = User.objects.create_superuser("late-admin", "late@example.com", "password")
+        self.client.force_authenticate(admin)
+        payload = {**self._draft_payload(), "organization": self.other_organization.id}
+        response = self.client.post(reverse("booking-list"), payload, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Booking.objects.get(pk=response.data["id"]).organization, self.other_organization)
+
+    def test_scan_upload_confirmation_and_paper_receipt_are_separate(self):
+        self.client.force_authenticate(self.user)
+        created = self.client.post(reverse("booking-list"), self._draft_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        booking_id = created.data["id"]
+        uploaded = self.client.post(reverse("booking-scan", args=[booking_id]), {"file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4\n%%EOF", content_type="application/pdf")}, format="multipart")
+        self.assertEqual(uploaded.status_code, 200, uploaded.data)
+        self.assertIsNotNone(uploaded.data["scan_uploaded_at"])
+        admin = User.objects.create_superuser("scan-admin", "admin@example.com", "password")
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.post(reverse("booking-approve", args=[booking_id])).status_code, 400)
+        self.assertEqual(self.client.post(reverse("booking-confirm-scan", args=[booking_id])).status_code, 200)
+        self.assertEqual(self.client.post(reverse("booking-confirm-physical", args=[booking_id])).status_code, 200)
+        self.assertEqual(self.client.post(reverse("booking-approve", args=[booking_id])).status_code, 200)
 
     def test_draft_without_room_has_no_expiry_and_is_hidden_from_admin_list(self):
         self.client.force_authenticate(self.user)
@@ -224,7 +329,8 @@ class BookingApiTests(APITestCase):
         self.assertEqual(submitted.status_code, 200, submitted.data)
         booking = Booking.objects.get(pk=created.data["id"])
         self.assertEqual(booking.status, BookingStatus.PENDING_HOLD)
-        self.assertGreater((booking.hold_expires_at - timezone.now()).total_seconds(), 47 * 3600)
+        self.assertGreater((booking.scan_deadline_at - timezone.now()).total_seconds(), 23 * 3600)
+        self.assertEqual(booking.hold_expires_at, booking.scan_deadline_at)
 
     def test_second_roomed_draft_cannot_hold_same_room_and_time(self):
         self.client.force_authenticate(self.user)
@@ -332,10 +438,16 @@ class BookingApiTests(APITestCase):
             self.other_organization,
         )
 
-    def test_approve_records_hard_copy(self):
+    def test_approve_requires_confirmed_scan_and_hard_copy(self):
         booking = self._booking()
         submit_booking(booking, self.user)
         admin = User.objects.create_user("admin", password="password", is_staff=True)
+        with self.assertRaises(ValidationError):
+            approve_booking(booking, admin)
+        booking.scan_uploaded_at = timezone.now()
+        booking.scan_confirmed_at = timezone.now()
+        booking.physical_status = PhysicalStatus.DA_NHAN_BAN_CUNG
+        booking.save(update_fields=["scan_uploaded_at", "scan_confirmed_at", "physical_status"])
         approved = approve_booking(booking, admin)
         self.assertEqual(approved.status, BookingStatus.APPROVED)
         self.assertEqual(approved.physical_status, PhysicalStatus.DA_NHAN_BAN_CUNG)
@@ -468,6 +580,10 @@ class BookingApiTests(APITestCase):
         booking = self._booking()
         submit_booking(booking, self.user)
         admin = User.objects.create_user("approver", password="password", is_staff=True)
+        booking.scan_uploaded_at = timezone.now()
+        booking.scan_confirmed_at = timezone.now()
+        booking.physical_status = PhysicalStatus.DA_NHAN_BAN_CUNG
+        booking.save(update_fields=["scan_uploaded_at", "scan_confirmed_at", "physical_status"])
         approve_booking(booking, admin)
         self.client.force_authenticate(self.other_user)
         response = self.client.get(reverse("room-available"), {
@@ -670,6 +786,7 @@ class BookingConflictServiceTests(APITestCase):
             user=self.user,
             role=role,
             organization=self.organization,
+            phone="0900000000", profile_completed_at=timezone.now(),
         )
         campus = Campus.objects.create(name="Campus", code="C")
         building = Building.objects.create(
@@ -768,6 +885,7 @@ class BookingMaintenanceTaskTests(APITestCase):
             end_time=start + timedelta(hours=1),
             status=BookingStatus.PENDING_HOLD,
             hold_expires_at=timezone.now() - timedelta(minutes=1),
+            scan_deadline_at=timezone.now() - timedelta(minutes=1),
             created_by=self.user,
         )
 
@@ -805,3 +923,23 @@ class BookingMaintenanceTaskTests(APITestCase):
 
         booking.refresh_from_db()
         self.assertEqual(booking.status, BookingStatus.COMPLETED)
+
+    def test_overdue_paper_warns_staff_without_cancelling_room(self):
+        admin = User.objects.create_user("office-warning", password="password")
+        UserProfile.objects.create(user=admin, role=Role.objects.get(name="YU_ADMIN"))
+        start = future_weekday()
+        booking = Booking.objects.create(
+            organization=self.organization, room=self.room, activity_name="Paper pending",
+            description="Meeting", participant_count=5, contact_person="Person",
+            contact_phone="0900000000", contact_email="club@example.com",
+            start_time=start, end_time=start + timedelta(hours=1),
+            status=BookingStatus.PENDING_HOLD, created_by=self.user,
+            scan_uploaded_at=timezone.now(), scan_deadline_at=timezone.now() - timedelta(hours=1),
+            paper_deadline_at=timezone.now() - timedelta(minutes=1),
+        )
+        self.assertEqual(warn_overdue_physical_copies(), 1)
+        self.assertEqual(warn_overdue_physical_copies(), 0)
+        self.assertEqual(auto_expire_unsubmitted_bookings(), 0)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, BookingStatus.PENDING_HOLD)
+        self.assertTrue(Notification.objects.filter(user=admin, related_booking=booking, type=Notification.NotificationType.PHYSICAL_REMINDER).exists())

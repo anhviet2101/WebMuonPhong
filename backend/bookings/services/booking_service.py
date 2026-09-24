@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 import logging
 import re
 
@@ -16,6 +16,7 @@ from backend.bookings.models import (
     BookingApproval,
     BookingStatus,
     BusinessRuleConfig,
+    BorrowingPolicy,
     Notification,
     PhysicalStatus,
     Room,
@@ -28,6 +29,9 @@ from backend.bookings.permissions import get_user_organization_id, user_has_perm
 
 PHYSICAL_SUBMISSION_DEADLINE_KEY = "physical_submission_deadline_hours"
 DEFAULT_PHYSICAL_SUBMISSION_DEADLINE_HOURS = 48
+SCAN_DEADLINE_HOURS_KEY = "scan_deadline_hours"
+PAPER_CUTOFF_WEEKDAY_KEY = "paper_cutoff_weekday"
+PAPER_CUTOFF_HOUR_KEY = "paper_cutoff_hour"
 MIN_ADVANCE_HOURS_KEY = "min_advance_hours"
 MAX_ADVANCE_DAYS_KEY = "max_advance_days"
 MAX_BOOKING_DURATION_HOURS_KEY = "max_booking_duration_hours"
@@ -77,13 +81,47 @@ def validate_booking_window(start_time, end_time):
         raise ValidationError("Thời gian mượn phòng phải kết thúc trước hoặc đúng 21:00.")
 
 
-def prepare_draft_hold(booking, previous=None):
+def paper_deadline_for(start_time):
+    booking_day = timezone.localtime(start_time).date()
+    week_monday = booking_day - timedelta(days=booking_day.weekday())
+    cutoff_weekday = _get_business_rule_int(PAPER_CUTOFF_WEEKDAY_KEY, 3)
+    cutoff_hour = _get_business_rule_int(PAPER_CUTOFF_HOUR_KEY, 15)
+    if cutoff_weekday not in range(7) or cutoff_hour not in range(24):
+        raise ValidationError("Cấu hình hạn nộp bản cứng không hợp lệ.")
+    cutoff_day = week_monday - timedelta(days=7) + timedelta(days=cutoff_weekday)
+    return timezone.make_aware(datetime.combine(cutoff_day, time(cutoff_hour)), timezone.get_current_timezone())
+
+
+def validate_club_borrowing_policy(start_time, room, actor=None, policies=None):
+    if actor is None or rbac_is_admin(actor):
+        return
+    requested = timezone.localtime(start_time).date()
+    current = timezone.localdate()
+    current_monday = current - timedelta(days=current.weekday())
+    next_monday = current_monday + timedelta(days=7)
+    if not next_monday <= requested < next_monday + timedelta(days=6):
+        raise ValidationError("CLB chỉ được đăng ký từ thứ Hai đến thứ Bảy của tuần ngay sau tuần hiện tại.")
+    if room is None:
+        return
+    week_key = next_monday.isoformat()
+    matching = policies if policies is not None else BorrowingPolicy.objects.filter(campus_id=room.building.campus_id)
+    for policy in matching:
+        if policy.campus_id != room.building.campus_id or (policy.building_id and policy.building_id != room.building_id) or (policy.room_id and policy.room_id != room.pk):
+            continue
+        if week_key in policy.locked_weeks:
+            raise ValidationError("Tuần này đã bị cán bộ khóa tại cơ sở/tòa nhà/phòng đã chọn.")
+        if requested.weekday() not in policy.allowed_weekdays:
+            raise ValidationError("Cơ sở/tòa nhà/phòng không cho mượn vào thứ đã chọn.")
+
+
+def prepare_draft_hold(booking, previous=None, actor=None):
     if not booking.room_id:
         booking.hold_expires_at = None
         booking.secondary_room = None
         return
     release_expired_drafts()
     validate_booking_window(booking.start_time, booking.end_time)
+    validate_club_borrowing_policy(booking.start_time, booking.room, actor)
     _ensure_room_can_be_booked(booking, booking.room)
     _validate_no_room_conflict(booking, booking.room)
     _validate_no_blackout_conflict(booking, booking.room)
@@ -97,12 +135,13 @@ def prepare_draft_hold(booking, previous=None):
     booking.hold_expires_at = previous.hold_expires_at if same_slot else timezone.now() + timedelta(hours=DRAFT_HOLD_HOURS)
 
 
-def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=None):
+def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=None, actor=None):
     """Return rooms free of active holds, bookings and blackouts, including buffers."""
     if not start_time or not end_time or start_time >= end_time:
         raise ValidationError("Thời gian kết thúc phải sau thời gian bắt đầu.")
     release_expired_drafts()
     validate_booking_window(start_time, end_time)
+    validate_club_borrowing_policy(start_time, None, actor)
 
     rooms = queryset if queryset is not None else Room.objects.select_related(
         "building", "building__campus"
@@ -116,6 +155,8 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
     rooms = list(rooms)
     if not rooms:
         return []
+
+    policies = list(BorrowingPolicy.objects.filter(campus_id__in={room.building.campus_id for room in rooms})) if actor is not None and not rbac_is_admin(actor) else []
 
     max_before = max(max(15, room.buffer_before_minutes) for room in rooms)
     max_after = max(max(15, room.buffer_after_minutes) for room in rooms)
@@ -141,6 +182,10 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
 
     available = []
     for room in rooms:
+        try:
+            validate_club_borrowing_policy(start_time, room, actor, policies)
+        except ValidationError:
+            continue
         before = max(15, room.buffer_before_minutes)
         after = max(15, room.buffer_after_minutes)
         buffered_start = start_time - timedelta(minutes=before)
@@ -165,9 +210,10 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
     return available
 
 
-def validate_active_booking_schedule(booking):
+def validate_active_booking_schedule(booking, actor=None):
     """Recheck all server-side availability rules after an active booking edit."""
     validate_booking_window(booking.start_time, booking.end_time)
+    validate_club_borrowing_policy(booking.start_time, booking.room, actor)
     release_expired_drafts()
     _ensure_room_can_be_booked(booking, booking.room)
     _validate_no_room_conflict(booking, booking.room)
@@ -258,7 +304,7 @@ def transition_status(booking, target_status, user, reason=None, new_room=None):
 
             if target_status == PENDING_HOLD:
                 _prepare_pending_hold(locked_booking)
-                update_fields.append("hold_expires_at")
+                update_fields.extend(["hold_expires_at", "scan_deadline_at", "paper_deadline_at"])
 
             if target_status == ROOM_CHANGED:
                 resolved_room = _resolve_room_for_update(new_room)
@@ -314,12 +360,7 @@ def approve_booking(booking, user, reason=None):
         if locked_booking.status not in {PENDING_HOLD, NEEDS_REVISION}:
             raise ValidationError("Chỉ duyệt đơn đang chờ xử lý.")
         if locked_booking.physical_status != CONFIRMED_RECEIVED:
-            old_value = _booking_audit_snapshot(locked_booking)
-            locked_booking.physical_status = CONFIRMED_RECEIVED
-            locked_booking.physical_confirmed_at = timezone.now()
-            locked_booking.physical_confirmed_by = user
-            locked_booking.save(update_fields=["physical_status", "physical_confirmed_at", "physical_confirmed_by", "updated_at"])
-            _create_audit_log(locked_booking, user, "confirm_physical", old_value)
+            raise ValidationError("Cán bộ cần xác nhận đã nhận bản cứng trước khi duyệt.")
         return transition_status(locked_booking, APPROVED, user, reason)
 
 
@@ -407,19 +448,24 @@ def _validate_transition(booking, target_status, user, reason, new_room):
         _require_yu_admin(user)
 
     if target_status == PENDING_HOLD:
+        if not rbac_is_admin(user) and not getattr(getattr(user, "booking_profile", None), "profile_completed_at", None):
+            raise ValidationError("Vui lòng hoàn thiện thông tin cá nhân trước khi gửi đơn.")
         if booking.status == DRAFT and booking.hold_expires_at and booking.hold_expires_at <= timezone.now():
             raise ValidationError("Thời gian giữ phòng của bản nháp đã hết. Vui lòng chọn lại phòng.")
         validate_booking_window(booking.start_time, booking.end_time)
+        validate_club_borrowing_policy(booking.start_time, booking.room, user)
         if not all((booking.room_id, booking.activity_name.strip(), booking.description.strip(), booking.participant_count, booking.contact_person.strip(), booking.contact_phone.strip(), booking.contact_email.strip())):
             raise ValidationError("Vui lòng điền đầy đủ phòng, hoạt động, thời gian, số người và thông tin liên hệ trước khi gửi đơn.")
         if not re.fullmatch(r"\+?[0-9][0-9 .-]*", booking.contact_phone) or not 9 <= len(re.sub(r"\D", "", booking.contact_phone)) <= 15:
             raise ValidationError("Số điện thoại/Zalo không hợp lệ.")
         _ensure_room_can_be_booked(booking, booking.room)
-        _validate_business_rules(booking)
+        _validate_business_rules(booking, user)
         _validate_no_room_conflict(booking, booking.room)
         _validate_no_blackout_conflict(booking, booking.room)
 
     if target_status == APPROVED:
+        if not booking.scan_confirmed_at:
+            raise ValidationError("Cán bộ chưa xác nhận bản scan của đơn.")
         if booking.physical_status != CONFIRMED_RECEIVED:
             raise ValidationError("Chưa nhận bản cứng từ CLB")
         _ensure_room_can_be_booked(booking, booking.room)
@@ -462,8 +508,8 @@ def _validate_expire_transition(booking):
     if booking.hold_expires_at and booking.hold_expires_at > timezone.now():
         raise ValidationError("Booking chưa hết hạn giữ chỗ.")
 
-    if booking.physical_status != NOT_SUBMITTED:
-        raise ValidationError("Booking đã nộp bản cứng nên không thể tự hết hạn.")
+    if booking.scan_uploaded_at:
+        raise ValidationError("Đơn đã nộp bản scan nên không thể tự hết hạn theo mốc scan.")
 
 
 def _validate_complete_transition(booking):
@@ -472,12 +518,9 @@ def _validate_complete_transition(booking):
 
 
 def _prepare_pending_hold(booking):
-    booking.hold_expires_at = timezone.now() + timedelta(
-        hours=_get_business_rule_int(
-            PHYSICAL_SUBMISSION_DEADLINE_KEY,
-            DEFAULT_PHYSICAL_SUBMISSION_DEADLINE_HOURS,
-        )
-    )
+    booking.scan_deadline_at = timezone.now() + timedelta(hours=_get_business_rule_int(SCAN_DEADLINE_HOURS_KEY, 24))
+    booking.paper_deadline_at = paper_deadline_for(booking.start_time)
+    booking.hold_expires_at = booking.scan_deadline_at
 
 
 def _get_business_rule_int(key, default):
@@ -495,17 +538,20 @@ def _get_business_rule_int(key, default):
         return default
 
 
-def _validate_business_rules(booking):
+def _validate_business_rules(booking, actor=None):
     now = timezone.now()
+    if booking.start_time <= now:
+        raise ValidationError("Thời gian mượn phòng phải ở trong tương lai.")
+    admin_override = actor is not None and rbac_is_admin(actor)
 
     min_advance_hours = _get_business_rule_int(MIN_ADVANCE_HOURS_KEY, 0)
-    if min_advance_hours > 0 and booking.start_time < now + timedelta(hours=min_advance_hours):
+    if not admin_override and min_advance_hours > 0 and booking.start_time < now + timedelta(hours=min_advance_hours):
         raise ValidationError(
             f"Cần đăng ký trước tối thiểu {min_advance_hours} giờ."
         )
 
     max_advance_days = _get_business_rule_int(MAX_ADVANCE_DAYS_KEY, 0)
-    if max_advance_days > 0 and booking.start_time > now + timedelta(days=max_advance_days):
+    if not admin_override and max_advance_days > 0 and booking.start_time > now + timedelta(days=max_advance_days):
         raise ValidationError(
             f"Không được đăng ký trước quá {max_advance_days} ngày."
         )
@@ -519,7 +565,7 @@ def _validate_business_rules(booking):
             )
 
     max_weekly = _get_business_rule_int(MAX_BOOKINGS_PER_WEEK_PER_ORG_KEY, 0)
-    if max_weekly > 0:
+    if not admin_override and max_weekly > 0:
         week_start = booking.start_time - timedelta(days=booking.start_time.weekday())
         week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
         week_end = week_start + timedelta(days=7)
@@ -541,7 +587,8 @@ def _validate_business_rules(booking):
     large_threshold = _get_business_rule_int(LARGE_ACTIVITY_PARTICIPANT_THRESHOLD_KEY, 0)
     large_min_days = _get_business_rule_int(LARGE_HALL_MIN_ADVANCE_DAYS_KEY, 0)
     if (
-        large_threshold > 0
+        not admin_override
+        and large_threshold > 0
         and large_min_days > 0
         and booking.participant_count >= large_threshold
         and booking.start_time < now + timedelta(days=large_min_days)
@@ -698,6 +745,15 @@ def _create_transition_notifications(booking, target_status, reason=None):
     recipient = _notify_user(booking.created_by, notification_type, message, booking)
     if recipient:
         recipients.append(recipient)
+    if rbac_is_admin(booking.created_by):
+        representatives = booking.created_by.__class__.objects.filter(
+            booking_profile__organization_id=booking.organization_id,
+            booking_profile__role__name="CLB_REP",
+            is_active=True,
+        ).exclude(pk=booking.created_by_id)
+        for representative in representatives:
+            if email := _notify_user(representative, notification_type, message, booking):
+                recipients.append(email)
     if recipients:
         transaction.on_commit(lambda: _queue_notification_emails(recipients, message))
 

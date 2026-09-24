@@ -36,6 +36,8 @@ class AccountTokenObtainPairSerializer(TokenObtainPairSerializer):
             "role": profile.role.name if profile else None,
             "organization_id": profile.organization_id if profile else None,
             "must_change_password": profile.must_change_password if profile else False,
+            "profile_completed": bool(profile and profile.profile_completed_at),
+            "phone": profile.phone if profile else "",
         }
         return data
 

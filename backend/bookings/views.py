@@ -1,5 +1,7 @@
 
 from copy import copy
+import re
+from django.http import HttpResponse
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
@@ -24,6 +26,7 @@ from backend.bookings.models import (
     BookingStatus,
     Building,
     BusinessRuleConfig,
+    BorrowingPolicy,
     Campus,
     DocumentTemplate,
     Notification,
@@ -55,6 +58,7 @@ from backend.bookings.serializers import (
     UserAdminSerializer,
     AuditLogSerializer,
     BusinessRuleConfigSerializer,
+    BorrowingPolicySerializer,
     DocumentTemplateSerializer,
     NotificationSerializer,
 )
@@ -134,13 +138,24 @@ class UserProfileView(APIView):
 
     def patch(self, request):
         user = request.user
-        allowed = {"first_name", "last_name", "email"}
+        allowed = {"first_name", "last_name", "email", "phone"}
         for key in set(request.data) - allowed:
             raise ValidationError({key: "Trường này không được cập nhật ở đây."})
-        for key in allowed.intersection(request.data):
+        for key in {"first_name", "last_name", "email"}.intersection(request.data):
             setattr(user, key, request.data[key])
+        profile = UserProfile.objects.select_related("role", "organization").filter(user=user).first()
+        if profile and "phone" in request.data:
+            phone = str(request.data["phone"]).strip()
+            if phone and (not re.fullmatch(r"\+?[0-9][0-9 .-]*", phone) or not 9 <= len(re.sub(r"\D", "", phone)) <= 15):
+                raise ValidationError({"phone": "Số điện thoại/Zalo không hợp lệ."})
+            profile.phone = phone
+        if profile and is_clb_rep(user):
+            values = (user.first_name.strip(), user.last_name.strip(), user.email.strip(), profile.phone.strip())
+            profile.profile_completed_at = timezone.now() if all(values) else None
         user.save()
-        return Response(_user_data(user, UserProfile.objects.select_related("role", "organization").filter(user=user).first()))
+        if profile:
+            profile.save(update_fields=["phone", "profile_completed_at"])
+        return Response(_user_data(user, profile))
 
 
 class AdminUserListView(APIView):
@@ -554,6 +569,7 @@ class RoomViewSet(FacilityArchiveMixin, viewsets.ModelViewSet):
                 end_time,
                 current_booking_id=exclude_booking.pk if exclude_booking else None,
                 queryset=queryset,
+                actor=request.user,
             )
         except DjangoValidationError as exc:
             raise ValidationError(_serialize_django_validation_error(exc)) from exc
@@ -585,6 +601,10 @@ class BookingViewSet(
                 HasPermission("booking.request_revision"),
             ],
             "change_room": [IsAuthenticated(), HasPermission("booking.change_room")],
+            "confirm_scan": [IsAuthenticated(), HasPermission("booking.approve")],
+            "confirm_physical": [IsAuthenticated(), HasPermission("booking.approve")],
+            "deadlines": [IsAuthenticated(), HasPermission("rule_config.manage")],
+            "export_mau_b": [IsAuthenticated(), HasPermission("document_template.manage")],
         }
         return action_permissions.get(self.action, super().get_permissions())
 
@@ -600,7 +620,7 @@ class BookingViewSet(
                 "secondary_room",
                 "created_by",
             )
-            .all()
+            .defer("scan_data")
         )
         queryset = filter_bookings_for_user(queryset, self.request.user)
         if self.action == "list" and is_admin(self.request.user):
@@ -634,7 +654,7 @@ class BookingViewSet(
             with transaction.atomic():
                 booking_service.release_expired_drafts()
                 booking = Booking(created_by=request.user, **serializer.validated_data)
-                booking_service.prepare_draft_hold(booking)
+                booking_service.prepare_draft_hold(booking, actor=request.user)
                 booking.full_clean()
                 booking.save()
         except DjangoValidationError as exc:
@@ -693,10 +713,10 @@ class BookingViewSet(
                 previous = copy(booking) if booking.status == BookingStatus.DRAFT else None
                 instance = serializer.save()
                 if instance.status == BookingStatus.DRAFT:
-                    booking_service.prepare_draft_hold(instance, previous)
+                    booking_service.prepare_draft_hold(instance, previous, actor=self.request.user)
                 instance.full_clean()
                 if instance.status in CONFLICT_STATUSES:
-                    booking_service.validate_active_booking_schedule(instance)
+                    booking_service.validate_active_booking_schedule(instance, self.request.user)
                 instance.save()
                 AuditLog.objects.create(
                     user=self.request.user,
@@ -790,6 +810,125 @@ class BookingViewSet(
             request.user,
             serializer.validated_data.get("reason"),
         )
+
+    @action(detail=True, methods=["get", "post"], url_path="scan")
+    def scan(self, request, pk=None):
+        booking = self.get_object()
+        if request.method == "GET":
+            if not booking.scan_data:
+                raise ValidationError("Đơn chưa có bản scan.")
+            response = HttpResponse(bytes(booking.scan_data), content_type=booking.scan_content_type)
+            response["Content-Disposition"] = f'inline; filename="{booking.scan_file_name}"'
+            response["X-Content-Type-Options"] = "nosniff"
+            return response
+        if not is_admin(request.user) and booking.organization_id != get_user_organization_id(request.user):
+            raise PermissionDenied("Chỉ đại diện đơn vị của đơn được nộp bản scan.")
+        if booking.status not in {BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION}:
+            raise ValidationError("Chỉ đơn đang chờ xử lý mới được tải bản scan.")
+        if booking.scan_deadline_at and timezone.now() > booking.scan_deadline_at and not is_admin(request.user):
+            raise ValidationError("Đã quá hạn nộp bản scan. Vui lòng liên hệ cán bộ để được gia hạn.")
+        uploaded = request.FILES.get("file")
+        if not uploaded or uploaded.size > 5 * 1024 * 1024:
+            raise ValidationError("Chọn tệp PDF/JPG/PNG không quá 5 MB.")
+        content = uploaded.read()
+        mime = "application/pdf" if content.startswith(b"%PDF-") else "image/png" if content.startswith(b"\x89PNG\r\n\x1a\n") else "image/jpeg" if content.startswith(b"\xff\xd8\xff") else None
+        if not mime:
+            raise ValidationError("Chỉ chấp nhận tệp PDF, JPG hoặc PNG hợp lệ.")
+        booking.scan_data = content
+        booking.scan_content_type = mime
+        booking.scan_file_name = re.sub(r"[^\w.\-]", "_", uploaded.name)[-100:]
+        booking.scan_uploaded_at = timezone.now()
+        booking.scan_confirmed_at = None
+        booking.scan_confirmed_by = None
+        booking.save(update_fields=["scan_data", "scan_content_type", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at", "scan_confirmed_by", "updated_at"])
+        AuditLog.objects.create(user=request.user, action="upload_scan", entity_type="Booking", entity_id=str(booking.pk), new_value={"file_name": booking.scan_file_name})
+        return Response(self.get_serializer(booking).data)
+
+    @action(detail=True, methods=["post"], url_path="confirm-scan")
+    def confirm_scan(self, request, pk=None):
+        booking = self.get_object()
+        if not booking.scan_uploaded_at:
+            raise ValidationError("CLB chưa tải bản scan.")
+        booking.scan_confirmed_at = timezone.now()
+        booking.scan_confirmed_by = request.user
+        booking.save(update_fields=["scan_confirmed_at", "scan_confirmed_by", "updated_at"])
+        AuditLog.objects.create(user=request.user, action="confirm_scan", entity_type="Booking", entity_id=str(booking.pk))
+        return Response(self.get_serializer(booking).data)
+
+    @action(detail=True, methods=["post"], url_path="confirm-physical")
+    def confirm_physical(self, request, pk=None):
+        booking = self.get_object()
+        if booking.status not in {BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION}:
+            raise ValidationError("Đơn không còn chờ xử lý.")
+        booking.physical_status = PhysicalStatus.DA_NHAN_BAN_CUNG
+        booking.physical_confirmed_at = timezone.now()
+        booking.physical_confirmed_by = request.user
+        booking.save(update_fields=["physical_status", "physical_confirmed_at", "physical_confirmed_by", "updated_at"])
+        AuditLog.objects.create(user=request.user, action="confirm_physical", entity_type="Booking", entity_id=str(booking.pk))
+        return Response(self.get_serializer(booking).data)
+
+    @action(detail=True, methods=["patch"], url_path="deadlines")
+    def deadlines(self, request, pk=None):
+        booking = self.get_object()
+        allowed = {"scan_deadline_at", "paper_deadline_at"}
+        if set(request.data) - allowed or not request.data:
+            raise ValidationError("Chỉ được chỉnh hạn bản scan hoặc bản cứng.")
+        fields = []
+        for field in allowed.intersection(request.data):
+            parsed = parse_datetime(request.data[field])
+            if not parsed or timezone.is_naive(parsed):
+                raise ValidationError({field: "Thời điểm phải có múi giờ hợp lệ."})
+            setattr(booking, field, parsed)
+            fields.append(field)
+        if "scan_deadline_at" in fields:
+            booking.hold_expires_at = booking.scan_deadline_at
+            fields.append("hold_expires_at")
+        if booking.status == BookingStatus.EXPIRED:
+            if "scan_deadline_at" not in fields or booking.scan_deadline_at <= timezone.now():
+                raise ValidationError("Muốn mở lại đơn hết hạn cần đặt hạn scan mới trong tương lai.")
+            try:
+                booking_service.validate_active_booking_schedule(booking, request.user)
+            except DjangoValidationError as exc:
+                raise ValidationError(_serialize_django_validation_error(exc)) from exc
+            booking.status = BookingStatus.PENDING_HOLD
+            fields.append("status")
+        try:
+            booking.save(update_fields=fields + ["updated_at"])
+        except IntegrityError as exc:
+            raise ValidationError("Phòng đã được giữ bởi đơn khác, không thể mở lại đơn này.") from exc
+        AuditLog.objects.create(user=request.user, action="extend_deadline", entity_type="Booking", entity_id=str(booking.pk), new_value={field: getattr(booking, field).isoformat() for field in allowed if field in request.data})
+        return Response(self.get_serializer(booking).data)
+
+    @action(detail=False, methods=["post"], url_path="export-mau-a")
+    def export_mau_a(self, request):
+        from backend.bookings.document_renderer import render_mau_a
+        fields = request.data.get("fields")
+        if not isinstance(fields, dict) or not isinstance(fields.get("slots"), list) or not fields["slots"]:
+            raise ValidationError("Cần chọn ít nhất một đơn để xuất Mẫu A.")
+        ids = [slot.get("bookingId") for slot in fields["slots"] if isinstance(slot, dict)]
+        owned = Booking.objects.filter(pk__in=ids)
+        if not is_admin(request.user):
+            owned = owned.filter(organization_id=get_user_organization_id(request.user))
+        if owned.count() != len(set(ids)):
+            raise PermissionDenied("Bạn không có quyền xuất một hoặc nhiều đơn đã chọn.")
+        content = render_mau_a(fields)
+        response = HttpResponse(content, content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        response["Content-Disposition"] = 'attachment; filename="mau-a.docx"'
+        return response
+
+    @action(detail=False, methods=["post"], url_path="export-mau-b")
+    def export_mau_b(self, request):
+        from backend.bookings.document_renderer import render_mau_b
+        rows = request.data.get("rows")
+        template = request.data.get("template")
+        if not isinstance(rows, list) or not rows or len(rows) > 100 or not isinstance(template, dict):
+            raise ValidationError("Danh sách đơn hoặc nội dung Mẫu B không hợp lệ.")
+        if any(not isinstance(row, dict) for row in rows):
+            raise ValidationError("Dòng trong Mẫu B không hợp lệ.")
+        content = render_mau_b(rows, template, str(request.data.get("issueDate", "")))
+        response = HttpResponse(content, content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        response["Content-Disposition"] = 'attachment; filename="mau-b.docx"'
+        return response
 
     @action(detail=False, methods=["get"], url_path="calendar")
     def calendar(self, request):
@@ -892,6 +1031,24 @@ class RoomBlackoutViewSet(viewsets.ModelViewSet):
             entity_id=str(pk),
             old_value=old_value,
         )
+
+
+class BorrowingPolicyViewSet(viewsets.ModelViewSet):
+    queryset = BorrowingPolicy.objects.select_related("campus", "building", "room").all()
+    serializer_class = BorrowingPolicySerializer
+    permission_classes = [IsAuthenticated, AdminWriteOrReadOnly]
+    write_permission_key = "rule_config.manage"
+
+    def perform_create(self, serializer):
+        values = serializer.validated_data
+        if BorrowingPolicy.objects.filter(campus=values["campus"], building=values.get("building"), room=values.get("room")).exists():
+            raise ValidationError("Đã có quy tắc cho phạm vi này. Hãy sửa quy tắc hiện tại.")
+        policy = serializer.save(updated_by=self.request.user)
+        AuditLog.objects.create(user=self.request.user, action="create_borrowing_policy", entity_type="BorrowingPolicy", entity_id=str(policy.pk))
+
+    def perform_update(self, serializer):
+        policy = serializer.save(updated_by=self.request.user)
+        AuditLog.objects.create(user=self.request.user, action="update_borrowing_policy", entity_type="BorrowingPolicy", entity_id=str(policy.pk))
 
 
 class BusinessRuleConfigViewSet(viewsets.ModelViewSet):
@@ -1072,6 +1229,8 @@ def _user_data(user, profile):
         if profile and profile.organization
         else None,
         "must_change_password": profile.must_change_password if profile else False,
+        "profile_completed": bool(profile and profile.profile_completed_at),
+        "phone": profile.phone if profile else "",
     }
 
 

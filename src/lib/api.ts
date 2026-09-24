@@ -21,6 +21,7 @@ export type AuthUser = {
   organizationName?: string;
   isActive: boolean;
   mustChangePassword: boolean;
+  profileCompleted?: boolean;
 };
 export type OrganizationProfile = {
   id?: string;
@@ -50,6 +51,7 @@ export type LoginResponse = {
     organization_name?: string;
     is_active?: boolean;
     must_change_password?: boolean;
+    profile_completed?: boolean;
   };
   must_change_password?: boolean;
 };
@@ -129,6 +131,7 @@ export const endpoints = {
   bookingCalendar: "/bookings/calendar/",
   blackouts: "/blackouts/",
   ruleConfigs: "/rule-configs/",
+  borrowingPolicies: "/borrowing-policies/",
   documentTemplates: "/document-templates/",
   notifications: "/notifications/",
   auditLogs: "/audit-logs/",

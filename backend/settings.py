@@ -121,6 +121,10 @@ MAINTENANCE_TOKEN = os.getenv("MAINTENANCE_TOKEN", "")
 if MAINTENANCE_TOKEN and len(MAINTENANCE_TOKEN) < 32:
     raise ImproperlyConfigured("MAINTENANCE_TOKEN must be at least 32 characters long.")
 CELERY_BEAT_SCHEDULE = {
+    "warn-overdue-physical-copies": {
+        "task": "backend.bookings.tasks.warn_overdue_physical_copies",
+        "schedule": 900.0,
+    },
     "auto-release-expired-draft-holds": {
         "task": "backend.bookings.tasks.auto_release_expired_draft_holds",
         "schedule": 60.0,

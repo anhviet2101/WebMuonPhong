@@ -28,6 +28,7 @@ function fromResponse(response: LoginResponse): UserProfile {
     organizationName: raw.organizationName ?? raw.organization_name,
     isActive: raw.isActive ?? raw.is_active ?? true,
     mustChangePassword: response.must_change_password ?? raw.mustChangePassword ?? raw.must_change_password ?? false,
+    profileCompleted: raw.profileCompleted ?? raw.profile_completed ?? false,
     phone: raw.phone,
     title: raw.title,
     organization: raw.organization,
@@ -39,12 +40,14 @@ function normalizeProfile(raw: UserProfile & Record<string, unknown>): UserProfi
     id: String(raw.id ?? ""),
     username: String(raw.username ?? ""),
     email: String(raw.email ?? ""),
-    fullName: String(raw.fullName ?? raw.full_name ?? raw.username ?? ""),
+    fullName: String(raw.fullName ?? raw.full_name ?? [raw.first_name, raw.last_name].filter(Boolean).join(" ") ?? raw.username ?? ""),
     role: (raw.role ?? "club") as string,
     organizationId: (raw.organizationId ?? raw.organization_id) as string | undefined,
     organizationName: (raw.organizationName ?? raw.organization_name) as string | undefined,
     isActive: Boolean(raw.isActive ?? raw.is_active ?? true),
     mustChangePassword: Boolean(raw.mustChangePassword ?? raw.must_change_password ?? false),
+    profileCompleted: Boolean(raw.profileCompleted ?? raw.profile_completed ?? false),
+    phone: String(raw.phone ?? ""),
     organization: raw.organization as UserProfile["organization"],
   };
 }
@@ -101,7 +104,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refreshProfile,
     setUser,
   }), [loading, user]);
-  return <AuthContext.Provider value={value}>{children}<PasswordGate /></AuthContext.Provider>;
+  return <AuthContext.Provider value={value}>{children}<PasswordGate /><ProfileGate /></AuthContext.Provider>;
 }
 
 export function useAuth() {
@@ -147,5 +150,43 @@ function PasswordGate() {
       <div className="grid gap-2"><Label>Nhập lại mật khẩu mới</Label><Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} /></div>
     </div>
     <DialogFooter><Button variant="outline" onClick={logout}>Đăng xuất</Button><Button onClick={submit} disabled={saving}>{saving ? "Đang lưu..." : "Đổi mật khẩu"}</Button></DialogFooter>
+  </DialogContent></Dialog>;
+}
+
+function ProfileGate() {
+  const { user, refreshProfile, logout } = useAuth();
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!user) return;
+    setEmail(user.email ?? "");
+    setPhone(user.phone ?? "");
+  }, [user?.id]);
+  const open = Boolean(user && isClubRole(user.role) && !user.mustChangePassword && !user.profileCompleted);
+  const submit = async () => {
+    if (!firstName.trim() || !lastName.trim() || !/^\S+@\S+\.\S+$/.test(email) || !/^\+?[0-9][0-9 .-]*$/.test(phone) || !/^\d{9,15}$/.test(phone.replace(/\D/g, ""))) {
+      toast.error("Vui lòng nhập đầy đủ họ, tên, email và số điện thoại/Zalo hợp lệ.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await authApi.updateProfile({ first_name: firstName.trim(), last_name: lastName.trim(), email: email.trim(), phone: phone.trim() } as Partial<UserProfile>);
+      await refreshProfile();
+      toast.success("Đã hoàn thiện thông tin cá nhân.");
+    } catch {
+      toast.error("Không thể lưu thông tin cá nhân. Vui lòng thử lại.");
+    } finally { setSaving(false); }
+  };
+  return <Dialog open={open}><DialogContent onPointerDownOutside={(event) => event.preventDefault()} onEscapeKeyDown={(event) => event.preventDefault()}>
+    <DialogHeader><DialogTitle>Hoàn thiện thông tin cá nhân</DialogTitle><DialogDescription>Vui lòng điền thông tin trước khi đăng ký mượn phòng lần đầu.</DialogDescription></DialogHeader>
+    <div className="grid gap-3">
+      <div className="grid grid-cols-2 gap-3"><div className="grid gap-2"><Label>Họ</Label><Input value={firstName} onChange={(event) => setFirstName(event.target.value)} /></div><div className="grid gap-2"><Label>Tên</Label><Input value={lastName} onChange={(event) => setLastName(event.target.value)} /></div></div>
+      <div className="grid gap-2"><Label>Email</Label><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></div>
+      <div className="grid gap-2"><Label>Số điện thoại/Zalo</Label><Input inputMode="tel" value={phone} onChange={(event) => setPhone(event.target.value.replace(/[^0-9+ .-]/g, ""))} /></div>
+    </div>
+    <DialogFooter><Button variant="outline" onClick={logout}>Đăng xuất</Button><Button onClick={submit} disabled={saving}>{saving ? "Đang lưu..." : "Lưu thông tin"}</Button></DialogFooter>
   </DialogContent></Dialog>;
 }
