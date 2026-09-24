@@ -20,15 +20,15 @@ export type PhysicalStatusKey =
   | "da_nhan_ban_cung";
 
 const bookingStatusLabel: Record<BookingStatusKey, string> = {
-  draft: "Draft",
-  pending_hold: "Pending Hold",
-  needs_revision: "Needs Revision",
-  approved: "Approved",
-  room_changed: "Room Changed",
-  completed: "Completed",
-  rejected: "Rejected",
-  cancelled: "Cancelled",
-  expired: "Expired",
+  draft: "Bản nháp",
+  pending_hold: "Đang giữ chỗ",
+  needs_revision: "Cần chỉnh sửa",
+  approved: "Đã duyệt",
+  room_changed: "Đã đổi phòng",
+  completed: "Đã hoàn thành",
+  rejected: "Bị từ chối",
+  cancelled: "Đã hủy",
+  expired: "Hết hạn",
 };
 
 const bookingStatusClass: Record<BookingStatusKey, string> = {

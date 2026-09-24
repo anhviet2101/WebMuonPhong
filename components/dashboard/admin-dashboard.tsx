@@ -371,6 +371,7 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
           <div className="sm:col-span-2">{templateField("closing", "Lời kết", 2)}</div>
           {templateField("leftSignature", "Chữ ký trái", 3)}
           {templateField("rightSignature", "Chữ ký phải", 3)}
+          {templateField("rightSignerName", "Họ tên người ký bên phải", 1)}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={close}>
@@ -523,6 +524,7 @@ function TemplateDialog({ open, close }: { open: boolean; close: () => void }) {
           <div className="sm:col-span-2">{input("closing", "Lời kết", 2)}</div>
           {input("leftSignature", "Chữ ký trái", 3)}
           {input("rightSignature", "Chữ ký phải", 3)}
+          {input("rightSignerName", "Họ tên người ký bên phải", 1)}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={close}>
@@ -583,7 +585,7 @@ function Facility() {
   const toggle = (enabled: boolean) => enabled ? "Đang hiển thị" : "Đã ẩn";
   const openNewCampus = () => setCampusForm({ id: "", code: "", name: "", address: "", active: true });
   const openNewBuilding = () => setBuildingForm({ id: "", campusId, code: "", name: "", active: true });
-  const openNewRoom = () => setRoomForm({ id: "", buildingId, name: "", capacity: 50, equipment: ["projector", "ac", "whiteboard"], rentable: true, bufferMinutes: 15, active: true });
+  const openNewRoom = () => setRoomForm({ id: "", buildingId, name: "", capacity: 50, equipment: [], rentable: true, bufferMinutes: 15, active: true });
   const archive = async (kind: "campus" | "building" | "room", id: string, name: string) => {
     const label = kind === "campus" ? "cơ sở" : kind === "building" ? "tòa nhà" : "phòng";
     if (!window.confirm(`Xóa ${label} "${name}"? Đơn cũ vẫn được giữ. Các địa điểm bên dưới sẽ tạm ẩn.`)) return;

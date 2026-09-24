@@ -145,6 +145,41 @@ class BookingApiTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(Booking.objects.filter(activity_name="Conflicting meeting").exists())
 
+    def test_update_and_submit_draft_saves_changes_and_holds_room(self):
+        booking = self._booking()
+        self.client.force_authenticate(self.user)
+        response = self.client.patch(
+            reverse("booking-update-and-submit", args=[booking.id]),
+            {"activity_name": "Updated meeting", "participant_count": 25},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        booking.refresh_from_db()
+        self.assertEqual(booking.activity_name, "Updated meeting")
+        self.assertEqual(booking.participant_count, 25)
+        self.assertEqual(booking.status, BookingStatus.PENDING_HOLD)
+        self.assertIsNotNone(booking.hold_expires_at)
+
+    def test_update_and_submit_conflict_rolls_back_draft_edits(self):
+        held = self._booking()
+        submit_booking(held, self.user)
+        draft = self._booking(start_offset=2)
+        self.client.force_authenticate(self.user)
+        response = self.client.patch(
+            reverse("booking-update-and-submit", args=[draft.id]),
+            {
+                "activity_name": "Should not be saved",
+                "start_time": held.start_time.isoformat(),
+                "end_time": held.end_time.isoformat(),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, BookingStatus.DRAFT)
+        self.assertEqual(draft.activity_name, "Weekly meeting")
+        self.assertNotEqual(draft.start_time, held.start_time)
+
     def test_admin_account_requires_and_keeps_selected_club(self):
         admin_role = Role.objects.get(name="YU_ADMIN")
         admin = User.objects.create_user("office", password="OfficePass123!")
@@ -196,6 +231,22 @@ class BookingApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(self.room.id, [item["id"] for item in response.data])
+
+    def test_available_rooms_filters_by_capacity(self):
+        self.client.force_authenticate(self.user)
+        start = timezone.now() + timedelta(days=3)
+        params = {
+            "start_time": start.isoformat(),
+            "end_time": (start + timedelta(hours=2)).isoformat(),
+        }
+        enough = self.client.get(reverse("room-available"), {**params, "participant_count": 50})
+        too_small = self.client.get(reverse("room-available"), {**params, "participant_count": 51})
+        invalid = self.client.get(reverse("room-available"), {**params, "participant_count": 0})
+        self.assertEqual(enough.status_code, 200, enough.data)
+        self.assertIn(self.room.id, [item["id"] for item in enough.data])
+        self.assertEqual(too_small.status_code, 200, too_small.data)
+        self.assertNotIn(self.room.id, [item["id"] for item in too_small.data])
+        self.assertEqual(invalid.status_code, 400)
 
     def test_minimum_fifteen_minute_buffer_blocks_room(self):
         self.room.buffer_before_minutes = 0

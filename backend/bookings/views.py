@@ -522,6 +522,18 @@ class RoomViewSet(FacilityArchiveMixin, viewsets.ModelViewSet):
         if building_id:
             queryset = queryset.filter(building_id=building_id)
 
+        participant_count = request.query_params.get("participant_count")
+        if participant_count is not None:
+            try:
+                participant_count = int(participant_count)
+            except ValueError as exc:
+                raise ValidationError({"participant_count": "Số người không hợp lệ."}) from exc
+            if participant_count < 1:
+                raise ValidationError({"participant_count": "Số người phải lớn hơn 0."})
+            queryset = queryset.filter(
+                Q(capacity__isnull=True) | Q(capacity__gte=participant_count)
+            )
+
         exclude_booking_id = request.query_params.get("exclude_booking")
         exclude_booking = None
         if exclude_booking_id:
@@ -560,6 +572,7 @@ class BookingViewSet(
         action_permissions = {
             "create": [IsAuthenticated(), HasPermission("booking.create")],
             "submit": [IsAuthenticated(), HasPermission("booking.create")],
+            "update_and_submit": [IsAuthenticated(), HasPermission("booking.create")],
             "approve": [IsAuthenticated(), HasPermission("booking.approve")],
             "reject": [IsAuthenticated(), HasPermission("booking.reject")],
             "request_revision": [
@@ -602,6 +615,25 @@ class BookingViewSet(
         except IntegrityError as exc:
             raise ValidationError("Phòng đã có lịch trùng trong khoảng thời gian này.") from exc
         return Response(self.get_serializer(booking).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["patch"], url_path="update-and-submit")
+    def update_and_submit(self, request, pk=None):
+        booking = self.get_object()
+        if booking.status not in {BookingStatus.DRAFT, BookingStatus.NEEDS_REVISION}:
+            raise ValidationError("Chỉ có thể gửi bản nháp hoặc đơn cần chỉnh sửa.")
+        serializer = self.get_serializer(booking, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                self.perform_update(serializer)
+                booking = booking_service.submit_booking(serializer.instance, request.user)
+        except DjangoValidationError as exc:
+            raise ValidationError(_serialize_django_validation_error(exc)) from exc
+        except DjangoPermissionDenied as exc:
+            raise PermissionDenied(str(exc)) from exc
+        except IntegrityError as exc:
+            raise ValidationError("Phòng đã có lịch trùng trong khoảng thời gian này.") from exc
+        return Response(self.get_serializer(booking).data)
 
     def perform_update(self, serializer):
         booking = self.get_object()

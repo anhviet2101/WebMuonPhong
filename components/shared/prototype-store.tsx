@@ -124,6 +124,7 @@ export type DocumentTemplateContent = {
   closing: string;
   leftSignature: string;
   rightSignature: string;
+  rightSignerName: string;
 };
 export type DocumentTemplate = {
   id?: string;
@@ -139,10 +140,11 @@ export const defaultDocumentTemplateContent: DocumentTemplateContent = {
   title: "ĐƠN ĐỀ NGHỊ",
   recipient: "Kính gửi: Phòng Hành chính Quản trị và Tổ chức Cán bộ",
   intro: "Thực hiện nhiệm vụ kế hoạch năm học, các đơn vị trực thuộc ĐTN – HSV tiến hành tổ chức sinh hoạt. Để hoạt động diễn ra đúng kế hoạch và thành công tốt đẹp, kính đề nghị Quý phòng xem xét và hỗ trợ. Cụ thể theo danh sách:",
-  commitment: "Các đơn vị trực thuộc ĐTN – HSV cam kết sau khi sử dụng phòng học xong sẽ trả đúng nguyên trạng ban đầu của phòng học.",
+  commitment: "Các đơn vị trực thuộc ĐTN – HSV cam kết sau khi sử dụng phòng học xong sẽ trả đúng nguyên trạng ban đầu của phòng học. Ngoài ra, các đơn vị sử dụng phòng buổi tối sẽ tự chủ động mượn và hoàn trả lại thiết bị về đúng nơi quy định. Nếu xảy ra trường hợp hỏng hóc hay mất thiết bị, đơn vị sẽ hoàn toàn chịu trách nhiệm.",
   closing: "Kính mong nhận được sự giúp đỡ của Quý Phòng.\nXin trân trọng cảm ơn!",
   leftSignature: "Ý KIẾN\nPHÒNG HCQT & TCCB",
   rightSignature: "TM. BCH ĐOÀN TRƯỜNG\nUV BAN THƯỜNG VỤ",
+  rightSignerName: "Nguyễn Thị Hằng",
 };
 
 type NewBooking = Omit<
@@ -526,7 +528,26 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
       },
       updateBooking: async (id, patch) => {
         const action = patch.status === "approved" ? "approve" : patch.status === "rejected" ? "reject" : patch.status === "needs_revision" ? "request-revision" : patch.status === "pending_hold" ? "submit" : undefined;
+        const payload = {
+          room: patch.roomId ? Number(patch.roomId) : undefined,
+          secondary_room: "backupRoomId" in patch ? (patch.backupRoomId ? Number(patch.backupRoomId) : null) : undefined,
+          activity_name: patch.activityName,
+          description: patch.description,
+          participant_count: patch.participants,
+          contact_person: patch.contactPerson,
+          contact_phone: patch.contactPhone,
+          contact_email: patch.contactEmail,
+          start_time: patch.startAt,
+          end_time: patch.endAt,
+          notes: patch.note,
+          equipment_request: patch.equipment ? Object.fromEntries(patch.equipment.map((x) => [x, true])) : undefined,
+        };
         try {
+          if (patch.status === "pending_hold" && patch.roomId) {
+            const { data } = await api.patch(`${endpoints.bookings}${id}/update-and-submit/`, payload);
+            setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
+            return;
+          }
           if (action) {
             const { data } = await api.post(`${endpoints.bookings}${id}/${action}/`, { reason: patch.note });
             setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
@@ -537,20 +558,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
             setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
             return;
           }
-          const { data } = await api.patch(`${endpoints.bookings}${id}/`, {
-            room: patch.roomId ? Number(patch.roomId) : undefined,
-            secondary_room: patch.backupRoomId ? Number(patch.backupRoomId) : undefined,
-            activity_name: patch.activityName,
-            description: patch.description,
-            participant_count: patch.participants,
-            contact_person: patch.contactPerson,
-            contact_phone: patch.contactPhone,
-            contact_email: patch.contactEmail,
-            start_time: patch.startAt,
-            end_time: patch.endAt,
-            notes: patch.note,
-            equipment_request: patch.equipment ? Object.fromEntries(patch.equipment.map((x) => [x, true])) : undefined,
-          });
+          const { data } = await api.patch(`${endpoints.bookings}${id}/`, payload);
           setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
         } catch (error) {
           showApiError(error, "Không thể cập nhật đơn");

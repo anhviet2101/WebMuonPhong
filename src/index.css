@@ -3,6 +3,16 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 
+.document-preview,
+.document-preview input,
+.document-preview textarea {
+  font-family: "Times New Roman", "Noto Serif", serif;
+  font-size: 14pt;
+  line-height: 1.35;
+  letter-spacing: normal;
+  font-kerning: normal;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 :root {

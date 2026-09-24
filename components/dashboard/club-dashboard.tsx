@@ -57,7 +57,6 @@ import {
   toLocalInput,
   usePrototypeStore,
   type Booking,
-  type Equipment,
 } from "@/components/shared/prototype-store";
 import {
   exportMauADocx,
@@ -69,13 +68,6 @@ import {
 import { useAuth } from "@/components/auth/auth-context";
 import { api, endpoints } from "@/lib/api";
 
-const equipment: { id: Equipment; label: string }[] = [
-  { id: "projector", label: "Máy chiếu" },
-  { id: "microphone", label: "Micro" },
-  { id: "ac", label: "Điều hòa" },
-  { id: "whiteboard", label: "Bảng" },
-  { id: "sound", label: "Âm thanh" },
-];
 const fmt = (iso: string) =>
   new Intl.DateTimeFormat("vi-VN", {
     dateStyle: "short",
@@ -150,9 +142,6 @@ function BookingFormDialog({
   const [contactEmail, setContactEmail] = useState(
     editing?.contactEmail ?? (user?.organization?.contact_email || user?.email || ""),
   );
-  const [selected, setSelected] = useState<Equipment[]>(
-    editing?.equipment ?? [],
-  );
   useEffect(() => {
     if (editing || !user) return;
     setContactPerson((current) => current || user.organization?.representative_name || user.fullName);
@@ -176,6 +165,7 @@ function BookingFormDialog({
   }, [campus, editing, editingRoom, editingBuilding, store.campuses, store.buildings]);
   const timeError = bookingTimeError(start, end);
   const validTime = timeError === null;
+  const validCount = Number.isInteger(Number(count)) && Number(count) > 0;
   const changeStart = (value: string) => {
     const previousStart = new Date(start);
     const nextStart = new Date(value);
@@ -197,6 +187,7 @@ function BookingFormDialog({
         end_time: new Date(end).toISOString(),
         building_id: building,
         exclude_booking: editing?.id,
+        participant_count: validCount ? Number(count) : undefined,
       },
     });
     return (data.results ?? data).map((item: { id: number | string }) =>
@@ -204,13 +195,15 @@ function BookingFormDialog({
     );
   };
   useEffect(() => {
-    if (!validTime || !building) {
+    if (!validTime || !validCount || !building) {
       setRemoteAvailableIds(null);
+      setLoadingRooms(false);
       return;
     }
     let cancelled = false;
     setLoadingRooms(true);
-    loadAvailableRoomIds()
+    setRemoteAvailableIds(null);
+    const timer = window.setTimeout(() => loadAvailableRoomIds()
       .then((ids) => {
         if (cancelled) return;
         setRemoteAvailableIds(ids);
@@ -226,11 +219,12 @@ function BookingFormDialog({
       })
       .finally(() => {
         if (!cancelled) setLoadingRooms(false);
-      });
+      }), 250);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [building, editing?.id, end, start, validTime]);
+  }, [building, count, editing?.id, end, start, validCount, validTime]);
   const resetBuilding = (value: string) => {
     setCampus(value);
     const first = store.buildings.find((b) => b.campusId === value);
@@ -293,13 +287,14 @@ function BookingFormDialog({
       contactPerson: contactPerson.trim(),
       contactPhone: contactPhone.trim(),
       contactEmail: contactEmail.trim(),
-      equipment: selected,
+      equipment: [],
     };
     try {
       if (editing) {
-        await store.updateBooking(editing.id, data);
         if (editing.status === "needs_revision" || editing.status === "draft") {
-          await store.updateBooking(editing.id, { status: "pending_hold" });
+          await store.updateBooking(editing.id, { ...data, status: "pending_hold" });
+        } else {
+          await store.updateBooking(editing.id, data);
         }
         toast.success("Đã cập nhật đơn");
       } else {
@@ -339,6 +334,11 @@ function BookingFormDialog({
             )}
           </div>
         )}
+        <div className="grid gap-2">
+          <Label>Số người dự kiến</Label>
+          <Input type="number" min={1} value={count} onChange={(e) => setCount(e.target.value)} />
+          {errors.count && <p className="text-sm text-red-600">{errors.count}</p>}
+        </div>
         <h3 className="font-semibold">Địa điểm</h3>
         {(
           <div className="grid gap-4 sm:grid-cols-2">
@@ -383,7 +383,7 @@ function BookingFormDialog({
             </div>
             <div className="grid gap-2">
               <Label>Phòng chính</Label>
-              <Select value={room} onValueChange={setRoom}>
+              <Select value={room} onValueChange={(value) => { setRoom(value); if (backup === value) setBackup("none"); }}>
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Chọn phòng trống" />
                 </SelectTrigger>
@@ -393,7 +393,7 @@ function BookingFormDialog({
                       Đang kiểm tra phòng trống...
                     </SelectItem>
                   )}
-                  {!loadingRooms && available.length === 0 && (
+                  {!loadingRooms && remoteAvailableIds !== null && available.length === 0 && (
                     <SelectItem value="empty" disabled>
                       Không có phòng trống trong khung giờ này
                     </SelectItem>
@@ -430,7 +430,7 @@ function BookingFormDialog({
                 </SelectContent>
               </Select>
             </div>
-            {!loadingRooms && available.length === 0 && (
+            {!loadingRooms && remoteAvailableIds !== null && validTime && validCount && building && available.length === 0 && (
               <p className="text-sm text-amber-700 sm:col-span-2">
                 Không có phòng khả dụng trong khung giờ đã chọn. Vui lòng đổi
                 thời gian hoặc tòa nhà.
@@ -453,15 +453,6 @@ function BookingFormDialog({
                 onChange={(e) => setDescription(e.target.value)}
               />
               {errors.description && <p className="text-sm text-red-600">{errors.description}</p>}
-            </div>
-            <div className="grid gap-2">
-              <Label>Số người</Label>
-              <Input
-                type="number"
-                value={count}
-                onChange={(e) => setCount(e.target.value)}
-              />
-              {errors.count && <p className="text-sm text-red-600">{errors.count}</p>}
             </div>
             <div className="grid gap-4 rounded-lg border bg-slate-50 p-4 sm:grid-cols-2">
               <div className="grid gap-2">
@@ -489,30 +480,6 @@ function BookingFormDialog({
                   onChange={(e) => setContactEmail(e.target.value)}
                 />
                 {errors.contactEmail && <p className="text-sm text-red-600">{errors.contactEmail}</p>}
-              </div>
-            </div>
-            <div className="grid gap-2">
-              <Label>Thiết bị</Label>
-              <div className="flex flex-wrap gap-2">
-                {equipment.map((e) => (
-                  <label
-                    key={e.id}
-                    className="flex items-center gap-2 rounded-md border p-2 text-sm"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selected.includes(e.id)}
-                      onChange={() =>
-                        setSelected((v) =>
-                          v.includes(e.id)
-                            ? v.filter((x) => x !== e.id)
-                            : [...v, e.id],
-                        )
-                      }
-                    />
-                    {e.label}
-                  </label>
-                ))}
               </div>
             </div>
           </div>
@@ -544,9 +511,6 @@ function BookingDetailDialog({
   const campus = building
     ? store.campuses.find((item) => item.id === building.campusId)
     : undefined;
-  const equipmentLabels = booking?.equipment
-    .map((item) => equipment.find((option) => option.id === item)?.label ?? item)
-    .join(", ");
 
   return (
     <Dialog open={!!booking} onOpenChange={(open) => !open && close()}>
@@ -595,10 +559,6 @@ function BookingDetailDialog({
                 <p className="mt-1 whitespace-pre-wrap text-slate-700">
                   {booking.description || "Chưa có mô tả"}
                 </p>
-              </div>
-              <div>
-                <p className="text-xs font-medium uppercase text-slate-500">Thiết bị</p>
-                <p className="mt-1 text-slate-700">{equipmentLabels || "Không yêu cầu"}</p>
               </div>
               {booking.note && (
                 <div>
@@ -677,7 +637,7 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
             )) : <p className="text-sm text-amber-700">Không có đơn giữ phòng hoặc đã duyệt trong khoảng này.</p>}
           </div>
         </div>
-        <div className="space-y-3 rounded-lg border bg-white p-6 font-serif text-black">
+        <div className="document-preview space-y-3 rounded-lg border bg-white p-6 text-black">
           <div className="grid gap-4 text-center sm:grid-cols-2">
             <div><b>{mauAFixed.institution}</b><Input className="mt-2 font-serif text-red-700" aria-label="Tên CLB" value={fields.clubName} onChange={(event) => field("clubName", event.target.value)} /></div>
             <div><Label>Ngày lập đơn</Label><Input className="mt-2 font-serif text-red-700" value={fields.issueDate} onChange={(event) => field("issueDate", event.target.value)} /></div>
@@ -692,9 +652,8 @@ function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null
               <label className="grid gap-1 sm:grid-cols-[120px_1fr] sm:items-center"><span>Địa điểm {fields.slots.length > 1 ? index + 1 : ""}</span><Input className="font-serif text-red-700" value={slot.location} onChange={(event) => slotField(slot.bookingId, "location", event.target.value)} /></label>
             </div>
           ))}
-          <p>Cơ sở vật chất: {fields.equipment}</p>
           <label className="grid gap-1 sm:grid-cols-[210px_1fr] sm:items-center"><span>Số lượng người tham gia:</span><Input className="font-serif text-red-700" value={fields.participants} onChange={(event) => field("participants", event.target.value)} /></label>
-          <p>{mauAFixed.commitment}</p><p className="whitespace-pre-line">{mauAFixed.closing}</p>
+          <p>{mauAFixed.commitment}</p><p>{mauAFixed.responsibility}</p><p className="whitespace-pre-line">{mauAFixed.closing}</p>
           <div className="grid gap-3 pt-4 text-center text-sm font-bold sm:grid-cols-3">
             <span>Ý KIẾN<br />PHÒNG HCQT VÀ TCCB</span><span>Ý KIẾN<br />HỘI SINH VIÊN TRƯỜNG</span>
             <div>TM. BAN CHỦ NHIỆM<Input className="mt-2 font-serif text-red-700" aria-label="Chức danh người ký" value={fields.signerTitle} onChange={(event) => field("signerTitle", event.target.value)} /><Input className="mt-4 font-serif text-red-700" aria-label="Tên người ký" value={fields.signerName} onChange={(event) => field("signerName", event.target.value)} /></div>
@@ -717,8 +676,9 @@ export function ClubDashboard() {
   // organization IDs are intentionally kept in clubCode, so do not filter by
   // the prototype's former "MEC" code.
   const mine = store.bookings;
+  const drafts = mine.filter((b) => b.status === "draft");
   const processing = mine.filter((b) =>
-    ["draft", "pending_hold", "needs_revision"].includes(b.status),
+    ["pending_hold", "needs_revision"].includes(b.status),
   );
   const upcoming = mine.filter(
     (b) =>
@@ -823,11 +783,13 @@ export function ClubDashboard() {
         <Tabs defaultValue="processing">
           <TabsList>
             <TabsTrigger value="processing">Đơn đang xử lý</TabsTrigger>
+            <TabsTrigger value="drafts">Bản nháp{drafts.length ? ` (${drafts.length})` : ""}</TabsTrigger>
             <TabsTrigger value="upcoming">Lịch sắp tới</TabsTrigger>
             <TabsTrigger value="history">Lịch sử</TabsTrigger>
           </TabsList>
           {[
             ["processing", processing],
+            ["drafts", drafts],
             ["upcoming", upcoming],
             ["history", history],
           ].map(([tab, list]) => (
@@ -837,6 +799,8 @@ export function ClubDashboard() {
                   <CardTitle>
                     {tab === "processing"
                       ? "Đơn đang xử lý"
+                      : tab === "drafts"
+                        ? "Bản nháp · chưa giữ phòng"
                       : tab === "upcoming"
                         ? "Lịch sắp tới"
                         : "Lịch sử"}
@@ -901,7 +865,11 @@ export function ClubDashboard() {
                           </TableCell>
                           <TableCell>
                             <div className="flex gap-2">
-                              <Button
+                              {b.status === "draft" ? <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => { setEditing(b); setFormOpen(true); }}
+                              >Tiếp tục</Button> : <Button
                                 size="sm"
                                 variant="outline"
                                 disabled={!['pending_hold', 'needs_revision', 'approved', 'room_changed'].includes(b.status)}
@@ -909,7 +877,7 @@ export function ClubDashboard() {
                               >
                                 <Download />
                                 Mẫu A
-                              </Button>
+                              </Button>}
                               {[
                                 "draft",
                                 "pending_hold",
