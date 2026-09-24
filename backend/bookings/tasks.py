@@ -1,9 +1,21 @@
 from celery import shared_task
+from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 
 from backend.bookings.models import Booking, BookingStatus, PhysicalStatus
 from backend.bookings.services.booking_service import release_expired_drafts, transition_status
+
+
+@shared_task(autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 3})
+def send_booking_notification_emails(recipients, message):
+    for recipient in recipients:
+        send_mail(
+            subject="[Mượn phòng CLB] Cập nhật đơn",
+            message=message,
+            from_email=None,
+            recipient_list=[recipient],
+        )
 
 
 @shared_task

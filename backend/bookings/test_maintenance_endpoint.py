@@ -17,7 +17,7 @@ class MaintenanceEndpointTests(TestCase):
             url, HTTP_AUTHORIZATION=f"Bearer {'a' * 48}"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"expired": 0, "completed": 0})
+        self.assertEqual(response.json(), {"expired": 0, "released_drafts": 0, "completed": 0})
 
     @override_settings(MAINTENANCE_TOKEN="")
     def test_endpoint_is_disabled_without_token(self):

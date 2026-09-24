@@ -1,6 +1,11 @@
 from datetime import datetime, time, timedelta
+from unittest.mock import patch
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.exceptions import ValidationError
+from django.db import connection
+from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
@@ -21,12 +26,14 @@ from backend.bookings.models import (
 from backend.bookings.services.booking_service import (
     approve_booking,
     change_room,
+    get_available_rooms,
     submit_booking,
 )
 from backend.bookings.tasks import (
     auto_complete_past_bookings,
     auto_expire_unsubmitted_bookings,
     auto_release_expired_draft_holds,
+    send_booking_notification_emails,
 )
 
 
@@ -364,6 +371,50 @@ class BookingApiTests(APITestCase):
         self.assertEqual(too_small.status_code, 200, too_small.data)
         self.assertNotIn(self.room.id, [item["id"] for item in too_small.data])
         self.assertEqual(invalid.status_code, 400)
+
+    def test_available_rooms_query_count_does_not_grow_with_rooms(self):
+        Room.objects.bulk_create([
+            Room(building=self.room.building, name=f"Extra {index}", floor=1, capacity=50)
+            for index in range(12)
+        ])
+        start = self._future_weekday()
+        with CaptureQueriesContext(connection) as queries:
+            available = get_available_rooms(
+                start, start + timedelta(hours=2),
+                queryset=Room.objects.filter(building=self.room.building),
+            )
+        self.assertEqual(len(available), 13)
+        self.assertLessEqual(len(queries), 5)
+
+    @override_settings(EMAIL_DELIVERY_MODE="async")
+    def test_submit_queues_email_only_after_commit(self):
+        self.user.email = "club@example.com"
+        self.user.save(update_fields=["email"])
+        booking = self._booking()
+        with patch("backend.bookings.tasks.send_booking_notification_emails.delay") as enqueue:
+            with self.captureOnCommitCallbacks(execute=True) as callbacks:
+                submit_booking(booking, self.user)
+                enqueue.assert_not_called()
+            self.assertEqual(len(callbacks), 1)
+            enqueue.assert_called_once_with(["club@example.com"], "Đơn 'Weekly meeting' đã được gửi và đang giữ chỗ.")
+
+    @override_settings(
+        EMAIL_DELIVERY_MODE="sync",
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    )
+    def test_submit_sends_email_without_worker(self):
+        self.user.email = "club@example.com"
+        self.user.save(update_fields=["email"])
+        with self.captureOnCommitCallbacks(execute=True):
+            submit_booking(self._booking(), self.user)
+        self.assertEqual([message.to for message in mail.outbox], [["club@example.com"]])
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_email_worker_sends_individual_messages(self):
+        send_booking_notification_emails(["club@example.com", "admin@example.com"], "Đơn đã được gửi")
+        self.assertEqual([message.to for message in mail.outbox], [
+            ["club@example.com"], ["admin@example.com"],
+        ])
 
     def test_minimum_fifteen_minute_buffer_blocks_room(self):
         self.room.buffer_before_minutes = 0

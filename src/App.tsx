@@ -1,12 +1,13 @@
-import { AdminDashboard } from "../components/dashboard/admin-dashboard";
-import { ClubDashboard } from "../components/dashboard/club-dashboard";
-import { RoomCalendar } from "../components/calendar/room-calendar";
 import { LoginPage } from "../components/auth/login-page";
-import { ProfilePage } from "../components/auth/profile-page";
-import { AdminUsersPage } from "../components/auth/admin-users-page";
 import { isClubRole, useAuth } from "../components/auth/auth-context";
-import { PrototypeStoreProvider } from "../components/shared/prototype-store";
-import { useEffect, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
+
+const AdminDashboard = lazy(() => import("../components/dashboard/admin-dashboard").then((module) => ({ default: module.AdminDashboard })));
+const ClubDashboard = lazy(() => import("../components/dashboard/club-dashboard").then((module) => ({ default: module.ClubDashboard })));
+const RoomCalendar = lazy(() => import("../components/calendar/room-calendar").then((module) => ({ default: module.RoomCalendar })));
+const ProfilePage = lazy(() => import("../components/auth/profile-page").then((module) => ({ default: module.ProfilePage })));
+const AdminUsersPage = lazy(() => import("../components/auth/admin-users-page").then((module) => ({ default: module.AdminUsersPage })));
+const PrototypeStoreProvider = lazy(() => import("../components/shared/prototype-store").then((module) => ({ default: module.PrototypeStoreProvider })));
 
 function ProtectedRoute({
   allow,
@@ -28,17 +29,17 @@ function ProtectedRoute({
 export default function App() {
   if (window.location.pathname === "/login") return <LoginPage />;
   if (window.location.pathname.startsWith("/clb/profile")) {
-    return <ProtectedRoute allow={isClubRole}><ProfilePage /></ProtectedRoute>;
+    return <ProtectedRoute allow={isClubRole}><Suspense fallback={<PageLoading />}><ProfilePage /></Suspense></ProtectedRoute>;
   }
   if (window.location.pathname.startsWith("/admin/users")) {
-    return <ProtectedRoute allow={(role) => !isClubRole(role)}><AdminUsersPage /></ProtectedRoute>;
+    return <ProtectedRoute allow={(role) => !isClubRole(role)}><Suspense fallback={<PageLoading />}><AdminUsersPage /></Suspense></ProtectedRoute>;
   }
   if (window.location.pathname.includes("admin-doan")) {
     return (
       <ProtectedRoute allow={(role) => !isClubRole(role)}>
-        <PrototypeStoreProvider>
+        <Suspense fallback={<PageLoading />}><PrototypeStoreProvider>
           <AdminDashboard />
-        </PrototypeStoreProvider>
+        </PrototypeStoreProvider></Suspense>
       </ProtectedRoute>
     );
   }
@@ -46,18 +47,22 @@ export default function App() {
   if (window.location.pathname.includes("calendar")) {
     return (
       <ProtectedRoute allow={() => true}>
-        <PrototypeStoreProvider>
+        <Suspense fallback={<PageLoading />}><PrototypeStoreProvider>
           <RoomCalendar />
-        </PrototypeStoreProvider>
+        </PrototypeStoreProvider></Suspense>
       </ProtectedRoute>
     );
   }
 
   return (
     <ProtectedRoute allow={isClubRole}>
-      <PrototypeStoreProvider>
+      <Suspense fallback={<PageLoading />}><PrototypeStoreProvider>
         <ClubDashboard />
-      </PrototypeStoreProvider>
+      </PrototypeStoreProvider></Suspense>
     </ProtectedRoute>
   );
+}
+
+function PageLoading() {
+  return <div className="flex min-h-screen items-center justify-center text-sm text-slate-500">Đang tải trang...</div>;
 }

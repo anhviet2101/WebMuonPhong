@@ -141,6 +141,7 @@ function QuickBooking({
 }) {
   const { addBooking } = usePrototypeStore();
   const { user } = useAuth();
+  const [submitting, setSubmitting] = useState(false);
   const [name, setName] = useState("");
   const [count, setCount] = useState("30");
   const [contactPerson, setContactPerson] = useState(
@@ -169,17 +170,10 @@ function QuickBooking({
     if (new Date(start) <= new Date()) return toast.error("Vui lòng chọn thời gian trong tương lai.");
     if (!contactPerson.trim() || !/^\+?[0-9][0-9 .-]*$/.test(contactPhone) || !/^\d{9,15}$/.test(contactPhone.replace(/\D/g, "")) || !/^\S+@\S+\.\S+$/.test(contactEmail))
       return toast.error("Vui lòng nhập đầy đủ tên, số điện thoại và email liên hệ hợp lệ");
+    if (submitting) return;
+    setSubmitting(true);
     try {
-      const { data } = await api.get(endpoints.availableRooms, {
-        params: { start_time: iso(start), end_time: iso(end) },
-      });
-      const availableIds = (data.results ?? data).map((item: { id: number | string }) => String(item.id));
-      if (!availableIds.includes(draft.room.id))
-        return toast.error("Phòng đã có đơn giữ hoặc blackout trong khung giờ này");
-    } catch {
-      return toast.error("Không thể kiểm tra phòng khả dụng. Vui lòng thử lại.");
-    }
-    const b = await addBooking({
+      const b = await addBooking({
       clubCode: user?.organization?.abbreviation ?? "",
       clubName: user?.organization?.name ?? user?.organizationName ?? "",
       activityName: name,
@@ -192,9 +186,14 @@ function QuickBooking({
       contactPhone: contactPhone.trim(),
       contactEmail: contactEmail.trim(),
       equipment: [],
-    });
-    toast.success(`Đã tạo ${b.id} và giữ chỗ 48 giờ`);
-    close();
+      });
+      toast.success(`Đã tạo ${b.id} và giữ chỗ 48 giờ`);
+      close();
+    } catch {
+      // The store displays the server validation error.
+    } finally {
+      setSubmitting(false);
+    }
   };
   return (
     <Dialog open={!!draft} onOpenChange={(v) => !v && close()}>
@@ -233,7 +232,7 @@ function QuickBooking({
           <Button variant="outline" onClick={close}>
             Hủy
           </Button>
-          <Button onClick={submit}>Gửi đơn</Button>
+          <Button onClick={submit} disabled={submitting}>{submitting ? "Đang gửi..." : "Gửi đơn"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

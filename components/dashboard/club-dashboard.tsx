@@ -257,30 +257,6 @@ function BookingFormDialog({
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) return;
     setSubmitting(true);
-    try {
-      const freshIds = await loadAvailableRoomIds();
-      setRemoteAvailableIds(freshIds);
-      if (
-        !freshIds.includes(room) ||
-        (backup !== "none" && !freshIds.includes(backup))
-      ) {
-        setRoom(freshIds.includes(room) ? room : "");
-        setBackup(
-          backup !== "none" && freshIds.includes(backup) ? backup : "none",
-        );
-        setErrors({ room: "Phòng đã có đơn giữ hoặc bị khóa trong khung giờ này." });
-        setSubmitting(false);
-        return toast.error(
-          "Phòng đã có đơn khác giữ trong khung giờ này. Vui lòng chọn phòng khác.",
-        );
-      }
-    } catch {
-      setErrors({ room: "Không thể kiểm tra phòng trống. Vui lòng thử lại." });
-      setSubmitting(false);
-      return toast.error(
-        "Không thể kiểm tra phòng khả dụng. Vui lòng thử lại trước khi gửi đơn.",
-      );
-    }
     const data = {
       clubCode: user?.organization?.abbreviation ?? "",
       clubName: user?.organization?.name ?? user?.organizationName ?? "",

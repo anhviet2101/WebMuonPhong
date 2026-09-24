@@ -1,8 +1,10 @@
 from datetime import timedelta
+import logging
 import re
 
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.core.mail import send_mail
+from django.conf import settings
+from django.core.mail import send_mass_mail
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -51,6 +53,7 @@ BLACKOUT_FLOOR = BlackoutScopeType.FLOOR.value
 
 CONFLICT_STATUSES = [PENDING_HOLD, APPROVED, ROOM_CHANGED]
 DRAFT_HOLD_HOURS = 1
+logger = logging.getLogger(__name__)
 
 
 def release_expired_drafts():
@@ -110,35 +113,54 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
         building__active=True,
         building__campus__active=True,
     )
+    rooms = list(rooms)
+    if not rooms:
+        return []
+
+    max_before = max(max(15, room.buffer_before_minutes) for room in rooms)
+    max_after = max(max(15, room.buffer_after_minutes) for room in rooms)
+    room_ids = [room.pk for room in rooms]
+    conflicts = Booking.objects.filter(
+        room_id__in=room_ids,
+        start_time__lt=end_time + timedelta(minutes=max_before + max_after),
+        end_time__gt=start_time - timedelta(minutes=max_before + max_after),
+    ).filter(Q(status__in=CONFLICT_STATUSES) | Q(status=DRAFT, hold_expires_at__gt=timezone.now()))
+    if current_booking_id is not None:
+        conflicts = conflicts.exclude(pk=current_booking_id)
+    bookings_by_room = {}
+    for room_id, booked_start, booked_end in conflicts.values_list("room_id", "start_time", "end_time"):
+        bookings_by_room.setdefault(room_id, []).append((booked_start, booked_end))
+
+    blackouts = list(RoomBlackout.objects.filter(
+        start_time__lt=end_time + timedelta(minutes=max_after),
+        end_time__gt=start_time - timedelta(minutes=max_before),
+    ).filter(
+        Q(scope_type=BLACKOUT_ROOM, room_ids__overlap=room_ids)
+        | Q(scope_type__in=[BLACKOUT_BUILDING, BLACKOUT_FLOOR], building_id__in=[room.building_id for room in rooms])
+    ))
+
     available = []
     for room in rooms:
         before = max(15, room.buffer_before_minutes)
         after = max(15, room.buffer_after_minutes)
         buffered_start = start_time - timedelta(minutes=before)
         buffered_end = end_time + timedelta(minutes=after)
-        conflicts = Booking.objects.filter(
-            room=room,
-            start_time__lt=buffered_end + timedelta(minutes=before),
-            end_time__gt=buffered_start - timedelta(minutes=after),
-        ).filter(Q(status__in=CONFLICT_STATUSES) | Q(status=DRAFT, hold_expires_at__gt=timezone.now()))
-        if current_booking_id is not None:
-            conflicts = conflicts.exclude(pk=current_booking_id)
-        if conflicts.exists():
+        if any(
+            booked_start < buffered_end + timedelta(minutes=before)
+            and booked_end > buffered_start - timedelta(minutes=after)
+            for booked_start, booked_end in bookings_by_room.get(room.pk, [])
+        ):
             continue
-
-        blackouts = RoomBlackout.objects.filter(
-            start_time__lt=buffered_end,
-            end_time__gt=buffered_start,
-        ).filter(
-            Q(scope_type=BLACKOUT_ROOM, room_ids__contains=[room.pk])
-            | Q(scope_type=BLACKOUT_BUILDING, building_id=room.building_id)
-            | Q(
-                scope_type=BLACKOUT_FLOOR,
-                building_id=room.building_id,
-                floor=room.floor,
+        if not any(
+            blackout.start_time < buffered_end
+            and blackout.end_time > buffered_start
+            and (
+                (blackout.scope_type == BLACKOUT_ROOM and room.pk in blackout.room_ids)
+                or (blackout.scope_type == BLACKOUT_BUILDING and blackout.building_id == room.building_id)
+                or (blackout.scope_type == BLACKOUT_FLOOR and blackout.building_id == room.building_id and blackout.floor == room.floor)
             )
-        )
-        if not blackouts.exists():
+            for blackout in blackouts
+        ):
             available.append(room)
     return available
 
@@ -669,29 +691,27 @@ def _create_transition_notifications(booking, target_status, reason=None):
     if reason:
         message = f"{message} Lý do/ghi chú: {reason}"
 
+    recipients = []
     if target_status == PENDING_HOLD:
-        _notify_admins(notification_type, message, booking)
+        recipients.extend(_notify_admins(notification_type, message, booking))
 
-    _notify_user(booking.created_by, notification_type, message, booking)
+    recipient = _notify_user(booking.created_by, notification_type, message, booking)
+    if recipient:
+        recipients.append(recipient)
+    if recipients:
+        transaction.on_commit(lambda: _queue_notification_emails(recipients, message))
 
 
 def _notify_user(user, notification_type, message, booking):
     if not _is_authenticated(user):
-        return
+        return None
     Notification.objects.create(
         user=user,
         type=notification_type,
         message=message,
         related_booking=booking,
     )
-    if getattr(user, "email", None):
-        send_mail(
-            subject="[Mượn phòng CLB] Cập nhật đơn",
-            message=message,
-            from_email=None,
-            recipient_list=[user.email],
-            fail_silently=True,
-        )
+    return getattr(user, "email", None)
 
 
 def _notify_admins(notification_type, message, booking):
@@ -703,8 +723,23 @@ def _notify_admins(notification_type, message, booking):
         .exclude(pk=booking.created_by_id)
         .distinct()
     )
-    for admin_user in admin_profiles:
-        _notify_user(admin_user, notification_type, message, booking)
+    return [email for admin_user in admin_profiles if (email := _notify_user(admin_user, notification_type, message, booking))]
+
+
+def _queue_notification_emails(recipients, message):
+    if settings.EMAIL_DELIVERY_MODE == "async":
+        from backend.bookings.tasks import send_booking_notification_emails
+
+        try:
+            send_booking_notification_emails.delay(recipients, message)
+            return
+        except Exception:
+            logger.exception("Could not queue booking notification email; sending directly")
+
+    send_mass_mail(
+        [("[Mượn phòng CLB] Cập nhật đơn", message, None, [recipient]) for recipient in recipients],
+        fail_silently=True,
+    )
 
 
 def _booking_audit_snapshot(booking):
