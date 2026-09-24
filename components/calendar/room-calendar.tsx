@@ -47,27 +47,35 @@ import {
   usePrototypeStore,
   type Booking,
   type Room,
+  type Blackout,
   toLocalInput,
 } from "@/components/shared/prototype-store";
 import { isClubRole, useAuth } from "@/components/auth/auth-context";
 import { api, endpoints } from "@/lib/api";
 
-const START = 7 * 60;
-const END = 21 * 60;
 const SLOT_MINUTES = 30;
-const TOTAL = END - START;
-const slots = Array.from(
-  { length: (END - START) / SLOT_MINUTES },
-  (_, i) => i,
-);
-const active = ["pending_hold", "approved", "room_changed"];
+const active = ["pending_hold", "needs_revision", "approved", "room_changed"];
 const clock = (iso: string) => format(new Date(iso), "HH:mm");
 const iso = (value: string) => new Date(value).toISOString();
-const defaultQuickEnd = (start: string) => {
+const blackoutOccurrence = (blackout: Blackout, day: Date): Blackout | null => {
+  const start = new Date(blackout.startAt);
+  const end = new Date(blackout.endAt);
+  const dayStart = new Date(day); dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
+  if (start < dayEnd && end > dayStart) return blackout;
+  if (!blackout.isRecurring || !blackout.recurrenceRule?.startsWith("WEEKLY_UNTIL:")) return null;
+  const until = blackout.recurrenceRule.slice("WEEKLY_UNTIL:".length);
+  const dayKey = format(dayStart, "yyyy-MM-dd");
+  if (dayKey > until || dayStart.getDay() !== start.getDay() || dayStart < new Date(new Date(start).setHours(0, 0, 0, 0))) return null;
+  const shiftedStart = new Date(dayStart); shiftedStart.setHours(start.getHours(), start.getMinutes(), start.getSeconds(), 0);
+  const shiftedEnd = new Date(shiftedStart.getTime() + end.getTime() - start.getTime());
+  return { ...blackout, startAt: shiftedStart.toISOString(), endAt: shiftedEnd.toISOString() };
+};
+const defaultQuickEnd = (start: string, closingHour = 21) => {
   const date = new Date(start);
   if (!Number.isFinite(date.getTime())) return "";
   const closing = new Date(date);
-  closing.setHours(END / 60, 0, 0, 0);
+  closing.setHours(closingHour, 0, 0, 0);
   return toLocalInput(new Date(Math.min(date.getTime() + 60 * 60_000, closing.getTime())).toISOString());
 };
 
@@ -76,20 +84,25 @@ function Event({
   admin,
   open,
   date,
+  firstMinute,
+  lastMinute,
 }: {
   booking: Booking;
   admin: boolean;
   open: () => void;
   date: Date;
+  firstMinute: number;
+  lastMinute: number;
 }) {
+  const total = lastMinute - firstMinute;
   const s = new Date(booking.startAt),
     e = new Date(booking.endAt);
   const dayStart = new Date(date);
   dayStart.setHours(0, 0, 0, 0);
   const startMinute = (s.getTime() - dayStart.getTime()) / 60000;
   const endMinute = (e.getTime() - dayStart.getTime()) / 60000;
-  const offset = Math.max(0, startMinute - START);
-  const duration = Math.max(0, Math.min(END, endMinute) - Math.max(START, startMinute));
+  const offset = Math.max(0, startMinute - firstMinute);
+  const duration = Math.max(0, Math.min(lastMinute, endMinute) - Math.max(firstMinute, startMinute));
   const ok = ["approved", "room_changed"].includes(booking.status);
   const hidden = !admin && booking.hiddenDetails;
   return (
@@ -97,8 +110,8 @@ function Event({
       <div
         className="pointer-events-none absolute top-5 h-10 rounded bg-slate-300/60"
         style={{
-          left: `${(Math.max(0, offset - 15) / TOTAL) * 100}%`,
-          width: `${((Math.min(TOTAL, offset + duration + 15) - Math.max(0, offset - 15)) / TOTAL) * 100}%`,
+          left: `${(Math.max(0, offset - 15) / total) * 100}%`,
+          width: `${((Math.min(total, offset + duration + 15) - Math.max(0, offset - 15)) / total) * 100}%`,
         }}
       />
       <button
@@ -112,8 +125,8 @@ function Event({
             : "border-amber-300 bg-amber-100 text-amber-900",
         )}
         style={{
-          left: `${(offset / TOTAL) * 100}%`,
-          width: `${(duration / TOTAL) * 100}%`,
+          left: `${(offset / total) * 100}%`,
+          width: `${(duration / total) * 100}%`,
         }}
       >
         <b className="block truncate">
@@ -139,7 +152,8 @@ function QuickBooking({
   draft: { room: Room; start: string } | null;
   close: () => void;
 }) {
-  const { addBooking } = usePrototypeStore();
+  const store = usePrototypeStore();
+  const { addBooking } = store;
   const { user } = useAuth();
   const admin = Boolean(user && !isClubRole(user.role));
   const [organizations, setOrganizations] = useState<{ id: number; name: string }[]>([]);
@@ -158,14 +172,14 @@ function QuickBooking({
     user?.organization?.contact_email || user?.email || "",
   );
   const [start, setStart] = useState(draft?.start ?? "");
-  const [end, setEnd] = useState(draft ? defaultQuickEnd(draft.start) : "");
-  const timeError = bookingTimeError(start, end, { earliestMinute: START, latestMinute: END });
+  const [end, setEnd] = useState(draft ? defaultQuickEnd(draft.start, store.bookingHours.end) : "");
+  const timeError = bookingTimeError(start, end, { earliestMinute: store.bookingHours.start * 60, latestMinute: store.bookingHours.end * 60 });
   const changeStart = (value: string) => {
     setStart(value);
     const nextStart = new Date(value);
     if (!Number.isFinite(nextStart.getTime())) return;
     if (start.slice(0, 10) !== value.slice(0, 10) || !Number.isFinite(new Date(end).getTime()) || new Date(end) <= nextStart)
-      setEnd(defaultQuickEnd(value));
+      setEnd(defaultQuickEnd(value, store.bookingHours.end));
   };
   const submit = async () => {
     if (!draft || !name.trim())
@@ -270,9 +284,12 @@ function Blackout({
   );
   const [reason, setReason] = useState("Phục vụ kỳ thi");
   const [note, setNote] = useState("");
+  const [recurring, setRecurring] = useState(false);
+  const [until, setUntil] = useState("");
   const submit = async () => {
     if (!selectedBuilding || (scope === "room" && !room) || !Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime()) || new Date(end) <= new Date(start))
       return toast.error("Khung khóa chưa hợp lệ");
+    if (recurring && (!until || until < start.slice(0, 10) || start.slice(0, 10) !== end.slice(0, 10))) return toast.error("Chọn ngày kết thúc lặp hợp lệ; mỗi lần khóa phải trong cùng một ngày.");
     await addBlackout({
       roomIds: scope === "room" ? [room] : [],
       scopeType: scope,
@@ -282,6 +299,8 @@ function Blackout({
       endAt: iso(end),
       reason,
       note,
+      isRecurring: recurring,
+      recurrenceRule: recurring ? `WEEKLY_UNTIL:${until}` : "",
     });
     toast.success("Đã tạo blackout trên Calendar");
     close();
@@ -331,6 +350,8 @@ function Blackout({
             <DateTime24Field label="Bắt đầu" value={start} onChange={setStart} />
             <DateTime24Field label="Kết thúc" value={end} onChange={setEnd} />
           </div>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={recurring} onChange={(event) => setRecurring(event.target.checked)} />Lặp lại hằng tuần</label>
+          {recurring && <div className="grid gap-2"><Label>Đến ngày</Label><Input type="date" value={until} onChange={(event) => setUntil(event.target.value)} /></div>}
           <div className="grid gap-2">
             <Label>Lý do</Label>
             <Select value={reason} onValueChange={setReason}>
@@ -371,8 +392,13 @@ function Blackout({
 }
 
 export function RoomCalendar() {
-  const { campuses, buildings, rooms, bookings, blackouts } =
+  const { campuses, buildings, rooms, bookings, blackouts, bookingHours, removeBlackout } =
     usePrototypeStore();
+  const firstMinute = bookingHours.start * 60;
+  const lastMinute = bookingHours.end * 60;
+  const totalMinutes = lastMinute - firstMinute;
+  const slotCount = Math.max(1, totalMinutes / SLOT_MINUTES);
+  const visibleSlots = Array.from({ length: slotCount }, (_, index) => index);
   const { user } = useAuth();
   const admin = Boolean(user && !isClubRole(user.role));
   const [campusId, setCampusId] = useState(""),
@@ -456,7 +482,7 @@ export function RoomCalendar() {
   const slotClick = (room: Room, i: number) => {
     const d = new Date(date);
     d.setHours(
-      Math.floor(START / 60) + Math.floor((i * SLOT_MINUTES) / 60),
+      bookingHours.start + Math.floor((i * SLOT_MINUTES) / 60),
       (i * SLOT_MINUTES) % 60,
       0,
       0,
@@ -636,21 +662,21 @@ export function RoomCalendar() {
               <div
                 className="grid border-b bg-slate-50"
                 style={{
-                  gridTemplateColumns: "200px repeat(28, minmax(60px, 1fr))",
+                  gridTemplateColumns: `200px repeat(${slotCount}, minmax(60px, 1fr))`,
                 }}
               >
                 <div className="sticky left-0 z-20 flex items-center border-r bg-background px-4 font-semibold">
                   Phòng
                 </div>
-                {slots.map((i) => (
+                {visibleSlots.map((i) => (
                   <div
                     key={i}
                     className="border-r py-3 text-center text-xs text-slate-500"
                   >
                     {`${String(
-                      Math.floor((START + i * SLOT_MINUTES) / 60),
+                      Math.floor((firstMinute + i * SLOT_MINUTES) / 60),
                     ).padStart(2, "0")}:${String(
-                      (START + i * SLOT_MINUTES) % 60,
+                      (firstMinute + i * SLOT_MINUTES) % 60,
                     ).padStart(2, "0")}`}
                   </div>
                 ))}
@@ -660,13 +686,13 @@ export function RoomCalendar() {
                   className="grid min-h-24 border-b"
                   style={{
                     gridTemplateColumns:
-                      "200px repeat(28, minmax(60px, 1fr))",
+                      `200px repeat(${slotCount}, minmax(60px, 1fr))`,
                   }}
                 >
                   <div className="sticky left-0 z-20 border-r bg-background p-4 text-sm text-slate-500">
                     Chưa có phòng
                   </div>
-                  <div className="col-span-28 flex items-center px-4 text-sm text-slate-500">
+                  <div className="flex items-center px-4 text-sm text-slate-500" style={{ gridColumn: `span ${slotCount}` }}>
                     Cơ sở/tòa nhà này chưa có phòng đang hoạt động để hiển thị.
                   </div>
                 </div>
@@ -675,29 +701,23 @@ export function RoomCalendar() {
                 const dayStart = new Date(date);
                 dayStart.setHours(0, 0, 0, 0);
                 const gridStart = new Date(dayStart);
-                gridStart.setHours(START / 60, 0, 0, 0);
+                gridStart.setHours(bookingHours.start, 0, 0, 0);
                 const gridEnd = new Date(dayStart);
-                gridEnd.setHours(END / 60, 0, 0, 0);
+                gridEnd.setHours(bookingHours.end, 0, 0, 0);
                 const bs = calendarBookings.filter(
                   (b) =>
                     b.roomId === room.id &&
                     active.includes(b.status) &&
                     new Date(b.startAt) < gridEnd && new Date(b.endAt) > gridStart,
                 );
-                const bos = blackouts.filter(
-                  (b) =>
-                    (b.roomIds.includes(room.id) ||
-                      (b.scopeType === "building" && b.buildingId === room.buildingId) ||
-                      (b.scopeType === "floor" && b.buildingId === room.buildingId && b.floor === room.floor)) &&
-                    new Date(b.startAt) < gridEnd && new Date(b.endAt) > gridStart,
-                );
+                const bos = blackouts.flatMap((item) => { const b = blackoutOccurrence(item, date); return b && (b.roomIds.includes(room.id) || (b.scopeType === "building" && b.buildingId === room.buildingId) || (b.scopeType === "floor" && b.buildingId === room.buildingId && b.floor === room.floor)) && new Date(b.startAt) < gridEnd && new Date(b.endAt) > gridStart ? [b] : []; });
                 return (
                   <div
                     key={room.id}
                     className="grid min-h-24 border-b"
                     style={{
                       gridTemplateColumns:
-                        "200px repeat(28, minmax(60px, 1fr))",
+                        `200px repeat(${slotCount}, minmax(60px, 1fr))`,
                     }}
                   >
                     <div className="sticky left-0 z-20 border-r bg-background p-4">
@@ -707,12 +727,13 @@ export function RoomCalendar() {
                       </p>
                     </div>
                     <div
-                      className="relative col-span-28 grid"
+                      className="relative grid"
                       style={{
-                        gridTemplateColumns: "repeat(28, minmax(60px, 1fr))",
+                        gridColumn: `span ${slotCount}`,
+                        gridTemplateColumns: `repeat(${slotCount}, minmax(60px, 1fr))`,
                       }}
                     >
-                      {slots.map((i) => (
+                      {visibleSlots.map((i) => (
                         <button
                           aria-label={`${room.name} slot ${i}`}
                           key={i}
@@ -727,6 +748,8 @@ export function RoomCalendar() {
                           booking={b}
                           admin={admin}
                           date={date}
+                          firstMinute={firstMinute}
+                          lastMinute={lastMinute}
                           open={() => setDetail(b)}
                         />
                       ))}
@@ -735,27 +758,23 @@ export function RoomCalendar() {
                           e = new Date(b.endAt),
                           startMinute = (s.getTime() - dayStart.getTime()) / 60000,
                           endMinute = (e.getTime() - dayStart.getTime()) / 60000,
-                          o = Math.max(0, startMinute - START),
-                          d = Math.max(0, Math.min(END, endMinute) - Math.max(START, startMinute));
+                          o = Math.max(0, startMinute - firstMinute),
+                          d = Math.max(0, Math.min(lastMinute, endMinute) - Math.max(firstMinute, startMinute));
                         return (
                           <button
                             key={b.id}
-                            onClick={() =>
-                              toast.info(
-                                `${b.reason}: ${b.note || "Không có ghi chú"}`,
-                              )
-                            }
+                            onClick={() => { if (admin && window.confirm(`Mở khóa ${b.reason}${b.isRecurring ? " và các lần lặp" : ""}?`)) { void removeBlackout(b.id).then(() => toast.success("Đã mở khóa phòng.")).catch(() => {}); } else if (!admin) toast.info(`${b.reason}: ${b.note || "Không có ghi chú"}`); }}
                             className="absolute top-3 z-10 h-14 overflow-hidden text-ellipsis whitespace-nowrap rounded-md border bg-slate-700 px-2 text-left text-xs text-white"
                             style={{
-                              left: `${(o / TOTAL) * 100}%`,
-                              width: `${(d / TOTAL) * 100}%`,
+                              left: `${(o / totalMinutes) * 100}%`,
+                              width: `${(d / totalMinutes) * 100}%`,
                               backgroundImage:
                                 "repeating-linear-gradient(135deg,rgba(255,255,255,.17) 0 6px,transparent 6px 12px)",
                             }}
                           >
                             <b className="block truncate">
                               <LockKeyhole className="mr-1 inline size-3" />
-                              {b.reason}
+                              {b.reason}{admin ? " · Bấm để mở khóa" : ""}
                             </b>
                             <span className="block truncate">{b.note}</span>
                           </button>

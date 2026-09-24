@@ -741,10 +741,13 @@ function BorrowingPolicyPanel() {
   const [lockedWeeks, setLockedWeeks] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [scanHours, setScanHours] = useState(24);
+  const [scanReuploadHours, setScanReuploadHours] = useState(24);
+  const [startHour, setStartHour] = useState(7);
+  const [endHour, setEndHour] = useState(21);
   const [paperDay, setPaperDay] = useState(3);
   const [paperHour, setPaperHour] = useState(15);
   useEffect(() => { void api.get(endpoints.borrowingPolicies).then(({ data }) => setPolicies(data.results ?? data)).catch(() => toast.error("Không tải được quy tắc mượn phòng.")); }, []);
-  useEffect(() => { void api.get(endpoints.ruleConfigs).then(({ data }) => { const rows: { key: string; value: number | { value: number } }[] = data.results ?? data; const get = (key: string, fallback: number) => { const raw = rows.find((item) => item.key === key)?.value; return typeof raw === "number" ? raw : raw && typeof raw.value === "number" ? raw.value : fallback; }; setScanHours(get("scan_deadline_hours", 24)); setPaperDay(get("paper_cutoff_weekday", 3)); setPaperHour(get("paper_cutoff_hour", 15)); }).catch(() => {}); }, []);
+  useEffect(() => { void api.get(endpoints.ruleConfigs).then(({ data }) => { const rows: { key: string; value: number | { value: number } }[] = data.results ?? data; const get = (key: string, fallback: number) => { const raw = rows.find((item) => item.key === key)?.value; return typeof raw === "number" ? raw : raw && typeof raw.value === "number" ? raw.value : fallback; }; setScanHours(get("scan_deadline_hours", 24)); setScanReuploadHours(get("scan_reupload_hours", 24)); setStartHour(get("booking_start_hour", 7)); setEndHour(get("booking_end_hour", 21)); setPaperDay(get("paper_cutoff_weekday", 3)); setPaperHour(get("paper_cutoff_hour", 15)); }).catch(() => {}); }, []);
   useEffect(() => { if (!campusId && store.campuses[0]) setCampusId(store.campuses[0].id); }, [campusId, store.campuses]);
   const current = policies.find((item) => String(item.campus) === campusId && (item.building ? String(item.building) : "all") === buildingId && (item.room ? String(item.room) : "all") === roomId);
   useEffect(() => { setDays(current?.allowed_weekdays ?? [0, 1, 2, 3, 4, 5]); setLockedWeeks(current?.locked_weeks ?? []); }, [current?.id, campusId, buildingId, roomId]);
@@ -764,17 +767,18 @@ function BorrowingPolicyPanel() {
     finally { setSaving(false); }
   };
   const saveDeadlines = async () => {
-    if (!Number.isInteger(scanHours) || scanHours < 1 || scanHours > 168 || paperDay < 0 || paperDay > 5 || paperHour < 0 || paperHour > 23) return toast.error("Mốc thời gian không hợp lệ.");
+    if (!Number.isInteger(scanHours) || scanHours < 1 || scanHours > 168 || !Number.isInteger(scanReuploadHours) || scanReuploadHours < 1 || scanReuploadHours > 168 || !Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour < 0 || endHour > 23 || startHour >= endHour || paperDay < 0 || paperDay > 5 || paperHour < 0 || paperHour > 23) return toast.error("Mốc thời gian không hợp lệ.");
     try {
-      for (const [key, value] of [["scan_deadline_hours", scanHours], ["paper_cutoff_weekday", paperDay], ["paper_cutoff_hour", paperHour]] as const) {
+      for (const [key, value] of [["scan_deadline_hours", scanHours], ["scan_reupload_hours", scanReuploadHours], ["booking_start_hour", startHour], ["booking_end_hour", endHour], ["paper_cutoff_weekday", paperDay], ["paper_cutoff_hour", paperHour]] as const) {
         try { await api.patch(`${endpoints.ruleConfigs}${key}/`, { value }); }
         catch (error: any) { if (error?.response?.status === 404) await api.post(endpoints.ruleConfigs, { key, value, description: "Cấu hình hạn nộp đơn" }); else throw error; }
       }
+      await store.refreshBookingHours();
       toast.success("Đã cập nhật mốc hạn cho các đơn gửi tiếp theo.");
     } catch { toast.error("Không thể cập nhật mốc hạn."); }
   };
   return <Card><CardHeader><CardTitle>Ngày cho phép và tuần khóa theo địa điểm</CardTitle></CardHeader><CardContent className="grid gap-5">
-    <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-4"><div><Label>Hạn scan sau gửi (giờ)</Label><Input type="number" min="1" max="168" value={scanHours} onChange={(event) => setScanHours(Number(event.target.value))} /></div><div><Label>Hạn giấy: thứ</Label><Select value={String(paperDay)} onValueChange={(value) => setPaperDay(Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Hai", "Ba", "Tư", "Năm", "Sáu", "Bảy"].map((name, index) => <SelectItem key={index} value={String(index)}>Thứ {name}</SelectItem>)}</SelectContent></Select></div><div><Label>Giờ hạn giấy</Label><Input type="number" min="0" max="23" value={paperHour} onChange={(event) => setPaperHour(Number(event.target.value))} /></div><div className="flex items-end"><Button onClick={() => void saveDeadlines()}>Lưu mốc hạn chung</Button></div></div>
+    <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-3"><div><Label>Hạn scan đầu (giờ)</Label><Input type="number" min="1" max="168" value={scanHours} onChange={(event) => setScanHours(Number(event.target.value))} /></div><div><Label>Hạn nộp lại scan (giờ)</Label><Input type="number" min="1" max="168" value={scanReuploadHours} onChange={(event) => setScanReuploadHours(Number(event.target.value))} /></div><div><Label>Giờ bắt đầu mượn</Label><Input type="number" min="0" max="22" value={startHour} onChange={(event) => setStartHour(Number(event.target.value))} /></div><div><Label>Giờ kết thúc mượn</Label><Input type="number" min="1" max="23" value={endHour} onChange={(event) => setEndHour(Number(event.target.value))} /></div><div><Label>Hạn giấy: thứ</Label><Select value={String(paperDay)} onValueChange={(value) => setPaperDay(Number(value))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Hai", "Ba", "Tư", "Năm", "Sáu", "Bảy"].map((name, index) => <SelectItem key={index} value={String(index)}>Thứ {name}</SelectItem>)}</SelectContent></Select></div><div><Label>Giờ hạn giấy</Label><Input type="number" min="0" max="23" value={paperHour} onChange={(event) => setPaperHour(Number(event.target.value))} /></div><div className="flex items-end"><Button onClick={() => void saveDeadlines()}>Lưu mốc hạn chung</Button></div></div>
     <p className="text-sm text-slate-600">CLB chỉ đăng ký cho một trong hai tuần kế tiếp (thứ Hai đến thứ Bảy). Quy tắc ở cơ sở, tòa nhà và phòng cùng có hiệu lực; admin vẫn có thể đăng ký hộ khi cần.</p>
     <div className="grid gap-3 md:grid-cols-3">
       <div><Label>Cơ sở</Label><Select value={campusId} onValueChange={(value) => { setCampusId(value); setBuildingId("all"); setRoomId("all"); }}><SelectTrigger><SelectValue placeholder="Chọn cơ sở" /></SelectTrigger><SelectContent>{store.campuses.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
@@ -1118,7 +1122,6 @@ export function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             {store.rooms.find((r) => r.id === b.roomId)?.name ?? b.roomName}
-                            {b.applicationGroup && <p className="text-xs text-blue-700">Lượt nhiều phòng · {b.applicationGroup.slice(0, 8)}</p>}
                             <p className="text-xs text-slate-500">
                               {fmt(b.startAt)}–{new Date(b.endAt).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}
                             </p>
@@ -1137,7 +1140,7 @@ export function AdminDashboard() {
                           <TableCell>
                             <div className="flex flex-wrap gap-2">
                               {b.scanUploadedAt && <Button size="sm" variant="outline" onClick={() => { void openBookingScan(b.id).catch(() => toast.error("Không thể mở bản scan.")); }}>Xem scan</Button>}
-                              {canProcess && b.physicalStatus === "chua_nhan" && b.scanUploadedAt && !b.scanConfirmedAt && <Button size="sm" variant="outline" onClick={async () => { try { await store.confirmScan(b.id); toast.success("Đã xác nhận bản scan"); } catch { toast.error("Không thể xác nhận bản scan"); } }}>Xác nhận scan</Button>}
+                              {canProcess && b.physicalStatus === "chua_nhan" && b.scanUploadedAt && <>{!b.scanConfirmedAt && <Button size="sm" variant="outline" onClick={async () => { try { await store.confirmScan(b.id); toast.success("Đã xác nhận bản scan"); } catch { toast.error("Không thể xác nhận bản scan"); } }}>Xác nhận scan</Button>}<Button size="sm" variant="outline" onClick={async () => { const reason = window.prompt("Lý do yêu cầu nộp lại scan (hạn mặc định 24 giờ, có thể chỉnh ở cấu hình):"); if (reason === null) return; try { await store.requestScanReupload(b.id, reason); toast.success("Đã yêu cầu CLB nộp lại scan."); } catch { toast.error("Không thể yêu cầu nộp lại scan."); } }}>Yêu cầu scan lại</Button></>}
                               {canProcess && b.physicalStatus === "chua_nhan" && <Button size="sm" variant="outline" onClick={async () => { try { await store.confirmPhysical(b.id); toast.success("Đã ghi nhận bản cứng"); } catch { toast.error("Không thể xác nhận bản cứng"); } }}>Nhận bản cứng</Button>}
                               {canApproveStatus && b.physicalStatus === "da_nhan_ban_cung" && <Button size="sm" onClick={async () => { try { await store.updateBooking(b.id, { status: "approved" }); toast.success("Đã duyệt đơn"); } catch { /* Store shows the API error. */ } }}>Duyệt</Button>}
                               {!['completed', 'cancelled', 'rejected'].includes(b.status) && <DropdownMenu>
@@ -1147,7 +1150,7 @@ export function AdminDashboard() {
                                   </Button>
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end">
-                                  {canProcess && <DropdownMenuItem
+                                  {canProcess && b.physicalStatus === "chua_nhan" && <DropdownMenuItem
                                     onClick={() =>
                                       setAction({
                                         type: "revision",
@@ -1157,7 +1160,7 @@ export function AdminDashboard() {
                                   >
                                     Yêu cầu sửa
                                   </DropdownMenuItem>}
-                                  {['pending_hold', 'needs_revision', 'approved', 'room_changed'].includes(b.status) && <DropdownMenuItem
+                                  {b.physicalStatus === "chua_nhan" && ['pending_hold', 'needs_revision', 'approved', 'room_changed'].includes(b.status) && <DropdownMenuItem
                                     onClick={() =>
                                       setAction({ type: "room", booking: b })
                                     }

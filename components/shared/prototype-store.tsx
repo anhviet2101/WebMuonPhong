@@ -89,7 +89,8 @@ export type Booking = {
   scanFileName?: string;
   scanUploadedAt?: string;
   scanConfirmedAt?: string;
-  applicationGroup?: string;
+  scanReuploadRequestedAt?: string;
+  scanReuploadReason?: string;
   note?: string;
   createdAt: string;
 };
@@ -103,6 +104,8 @@ export type Blackout = {
   endAt: string;
   reason: string;
   note?: string;
+  isRecurring?: boolean;
+  recurrenceRule?: string;
 };
 export type SupportContact = {
   name: string;
@@ -167,6 +170,8 @@ type Store = {
   archivedRooms: Room[];
   bookings: Booking[];
   blackouts: Blackout[];
+  bookingHours: { start: number; end: number };
+  refreshBookingHours: () => Promise<void>;
   documentTemplates: DocumentTemplate[];
   addCampus: (data: Omit<Campus, "id">) => Promise<void>;
   updateCampus: (id: string, patch: Partial<Campus>) => Promise<void>;
@@ -177,15 +182,17 @@ type Store = {
   archiveBuilding: (id: string) => Promise<void>;
   restoreBuilding: (id: string) => Promise<void>;
   addBooking: (data: NewBooking) => Promise<Booking>;
-  addBatchBooking: (data: NewBooking, roomIds: string[]) => Promise<Booking[]>;
   saveDraft: (data: NewBooking, id?: string) => Promise<Booking>;
   uploadScan: (id: string, file: File) => Promise<Booking>;
   confirmScan: (id: string) => Promise<Booking>;
+  requestScanReupload: (id: string, reason: string) => Promise<Booking>;
   confirmPhysical: (id: string) => Promise<Booking>;
   extendDeadlines: (id: string, patch: { scan_deadline_at?: string; paper_deadline_at?: string }) => Promise<Booking>;
   updateBooking: (id: string, patch: Partial<Booking>) => Promise<void>;
   cancelBooking: (id: string, reason?: string) => Promise<void>;
+  requestCancelBooking: (id: string, reason: string) => Promise<void>;
   addBlackout: (data: Omit<Blackout, "id">) => Promise<void>;
+  removeBlackout: (id: string) => Promise<void>;
   addRoom: (data: Omit<Room, "id">) => Promise<void>;
   updateRoom: (id: string, patch: Partial<Room>) => Promise<void>;
   archiveRoom: (id: string) => Promise<void>;
@@ -214,6 +221,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
   const [archivedRooms, setArchivedRooms] = useState<Room[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [blackouts, setBlackouts] = useState<Blackout[]>([]);
+  const [bookingHours, setBookingHours] = useState({ start: 7, end: 21 });
   const [documentTemplates, setDocumentTemplates] = useState<DocumentTemplate[]>([]);
   const [supportContact, setSupportContact] = useState<SupportContact>({
       name: "",
@@ -276,8 +284,8 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     organizationProfile: b.organization_profile, hiddenDetails: Boolean(b.hidden_details),
     holdExpiresAt: b.hold_expires_at, note: b.notes, createdAt: b.created_at,
     scanDeadlineAt: b.scan_deadline_at, paperDeadlineAt: b.paper_deadline_at,
+    scanReuploadRequestedAt: b.scan_reupload_requested_at, scanReuploadReason: b.scan_reupload_reason,
     scanFileName: b.scan_file_name, scanUploadedAt: b.scan_uploaded_at, scanConfirmedAt: b.scan_confirmed_at,
-    applicationGroup: b.application_group,
   });
   const mapNotification = (n: any): Notification => ({
     id: String(n.id),
@@ -338,7 +346,8 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
         load(api.get(`${endpoints.rooms}?archived=1`), (data: any) => setArchivedRooms((data.results ?? data).map(mapRoom)), "Không thể tải phòng đã xóa"),
       ] : []),
       load(api.get(endpoints.bookings), (data: any) => setBookings((data.results ?? data).map(mapBooking)), "Không thể tải danh sách đơn"),
-      load(api.get(endpoints.blackouts), (data: any) => setBlackouts((data.results ?? data).map((b: any) => ({ id: String(b.id), roomIds: (b.room_ids ?? []).map(String), scopeType: b.scope_type, buildingId: b.building ? String(b.building) : undefined, floor: b.floor, startAt: b.start_time, endAt: b.end_time, reason: b.reason ?? "", note: b.note }))), "Không thể tải danh sách khóa phòng", { quiet: !admin }),
+      load(api.get(endpoints.blackouts), (data: any) => setBlackouts((data.results ?? data).map((b: any) => ({ id: String(b.id), roomIds: (b.room_ids ?? []).map(String), scopeType: b.scope_type, buildingId: b.building ? String(b.building) : undefined, floor: b.floor, startAt: b.start_time, endAt: b.end_time, reason: b.reason ?? "", note: b.note, isRecurring: b.is_recurring, recurrenceRule: b.recurrence_rule }))), "Không thể tải danh sách khóa phòng", { quiet: !admin }),
+      load(api.get(endpoints.ruleConfigs), (data: any) => { const rows: { key: string; value: number | { value: number } }[] = data.results ?? data; const get = (key: string, fallback: number) => { const raw = rows.find((item) => item.key === key)?.value; return typeof raw === "number" ? raw : raw && typeof raw.value === "number" ? raw.value : fallback; }; setBookingHours({ start: get("booking_start_hour", 7), end: get("booking_end_hour", 21) }); }, "Không thể tải giờ mượn phòng", { quiet: true }),
       load(api.get(endpoints.notifications), (data: any) => setNotifications((data.results ?? data).map(mapNotification)), "Không thể tải thông báo", { quiet: true }),
       load(api.get(endpoints.documentTemplates), (data: any) => setDocumentTemplates((data.results ?? data).map(mapDocumentTemplate)), "Không thể tải mẫu đơn", { quiet: !admin }),
       load(api.get(`${endpoints.ruleConfigs}support_contact/`), (data: any) => {
@@ -446,6 +455,13 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
       archivedRooms,
       bookings,
       blackouts,
+      bookingHours,
+      refreshBookingHours: async () => {
+        const { data } = await api.get(endpoints.ruleConfigs);
+        const rows: { key: string; value: number | { value: number } }[] = data.results ?? data;
+        const get = (key: string, fallback: number) => { const raw = rows.find((item) => item.key === key)?.value; return typeof raw === "number" ? raw : raw && typeof raw.value === "number" ? raw.value : fallback; };
+        setBookingHours({ start: get("booking_start_hour", 7), end: get("booking_end_hour", 21) });
+      },
       documentTemplates,
       addCampus: async (data) => {
         try {
@@ -557,29 +573,6 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           throw error;
         }
       },
-      addBatchBooking: async (data, roomIds) => {
-        try {
-          const { data: remote } = await api.post(`${endpoints.bookings}batch/`, {
-            organization: data.clubCode && /^\d+$/.test(data.clubCode) ? Number(data.clubCode) : undefined,
-            room_ids: roomIds.map(Number),
-            activity_name: data.activityName,
-            description: data.description,
-            participant_count: data.participants,
-            contact_person: data.contactPerson,
-            contact_phone: data.contactPhone,
-            contact_email: data.contactEmail,
-            start_time: data.startAt,
-            end_time: data.endAt,
-            equipment_request: {},
-          });
-          const created = (remote as unknown[]).map(mapBooking);
-          setBookings((items) => [...created, ...items]);
-          return created;
-        } catch (error) {
-          showApiError(error, "Không thể đăng ký nhiều phòng");
-          throw error;
-        }
-      },
       saveDraft: async (data, id) => {
         const payload = {
           room: data.roomId ? Number(data.roomId) : null,
@@ -614,20 +607,26 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
         try {
           const { data } = await api.post(`${endpoints.bookings}${id}/scan/`, payload, { headers: { "Content-Type": "multipart/form-data" } });
           const booking = mapBooking(data);
-          setBookings((items) => items.map((item) => item.id === id ? booking : item.applicationGroup && item.applicationGroup === booking.applicationGroup ? { ...item, scanFileName: booking.scanFileName, scanUploadedAt: booking.scanUploadedAt, scanConfirmedAt: undefined } : item));
+          setBookings((items) => items.map((item) => item.id === id ? booking : item));
           return booking;
         } catch (error) { showApiError(error, "Không thể tải bản scan"); throw error; }
       },
       confirmScan: async (id) => {
         const { data } = await api.post(`${endpoints.bookings}${id}/confirm-scan/`);
         const booking = mapBooking(data);
-        setBookings((items) => items.map((item) => item.id === id ? booking : item.applicationGroup && item.applicationGroup === booking.applicationGroup ? { ...item, scanConfirmedAt: booking.scanConfirmedAt } : item));
+        setBookings((items) => items.map((item) => item.id === id ? booking : item));
+        return booking;
+      },
+      requestScanReupload: async (id, reason) => {
+        const { data } = await api.post(`${endpoints.bookings}${id}/request-scan-reupload/`, { reason });
+        const booking = mapBooking(data);
+        setBookings((items) => items.map((item) => item.id === id ? booking : item));
         return booking;
       },
       confirmPhysical: async (id) => {
         const { data } = await api.post(`${endpoints.bookings}${id}/confirm-physical/`);
         const booking = mapBooking(data);
-        setBookings((items) => items.map((item) => item.id === id ? booking : item.applicationGroup && item.applicationGroup === booking.applicationGroup ? { ...item, physicalStatus: booking.physicalStatus } : item));
+        setBookings((items) => items.map((item) => item.id === id ? booking : item));
         return booking;
       },
       extendDeadlines: async (id, patch) => {
@@ -684,6 +683,10 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           throw error;
         }
       },
+      requestCancelBooking: async (id, reason) => {
+        try { await api.post(`${endpoints.bookings}${id}/request-cancel/`, { reason }); }
+        catch (error) { showApiError(error, "Không thể gửi yêu cầu hủy"); throw error; }
+      },
       addBlackout: async (data) => {
         try {
           const { data: remote } = await api.post(endpoints.blackouts, {
@@ -694,12 +697,18 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
             start_time: data.startAt,
             end_time: data.endAt,
             reason: data.reason,
+            is_recurring: data.isRecurring ?? false,
+            recurrence_rule: data.recurrenceRule ?? "",
           });
           setBlackouts((items) => [{ ...data, id: String(remote.id) }, ...items]);
         } catch (error) {
           showApiError(error, "Không thể tạo blackout");
           throw error;
         }
+      },
+      removeBlackout: async (id) => {
+        try { await api.delete(`${endpoints.blackouts}${id}/`); setBlackouts((items) => items.filter((item) => item.id !== id)); }
+        catch (error) { showApiError(error, "Không thể mở khóa phòng"); throw error; }
       },
       addRoom: async (data) => {
         try {
@@ -809,7 +818,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [campusList, archivedCampuses, buildingList, archivedBuildings, rooms, archivedRooms, bookings, blackouts, documentTemplates, supportContact, notifications],
+    [campusList, archivedCampuses, buildingList, archivedBuildings, rooms, archivedRooms, bookings, blackouts, bookingHours, documentTemplates, supportContact, notifications],
   );
   return (
     <StoreContext.Provider value={value}>{children}</StoreContext.Provider>

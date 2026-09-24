@@ -260,6 +260,8 @@ class Booking(models.Model):
     scan_content_type = models.CharField(max_length=100, blank=True)
     scan_uploaded_at = models.DateTimeField(null=True, blank=True)
     scan_confirmed_at = models.DateTimeField(null=True, blank=True)
+    scan_reupload_requested_at = models.DateTimeField(null=True, blank=True)
+    scan_reupload_reason = models.TextField(blank=True)
     scan_confirmed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="confirmed_booking_scans",
@@ -283,7 +285,7 @@ class Booking(models.Model):
                     ("during", RangeOperators.OVERLAPS),
                 ],
                 condition=(
-                    Q(status__in=[BookingStatus.PENDING_HOLD, BookingStatus.APPROVED, BookingStatus.ROOM_CHANGED])
+                    Q(status__in=[BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION, BookingStatus.APPROVED, BookingStatus.ROOM_CHANGED])
                     | Q(status=BookingStatus.DRAFT, hold_expires_at__isnull=False)
                 ),
             ),
@@ -464,6 +466,7 @@ class Notification(models.Model):
         CANCELLED = "cancelled", "Cancelled"
         PHYSICAL_REMINDER = "physical_reminder", "Physical reminder"
         EXPIRED = "expired", "Expired"
+        CANCEL_REQUEST = "cancel_request", "Cancel request"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

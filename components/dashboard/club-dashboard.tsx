@@ -139,8 +139,6 @@ function BookingFormDialog({
     ? []
     : buildingRooms.filter((r) => remoteAvailableIds.includes(r.id));
   const [room, setRoom] = useState(editing?.roomId ?? "");
-  const [extraRooms, setExtraRooms] = useState<string[]>([]);
-  const selectedRooms = [room, ...extraRooms].filter(Boolean);
   const [backup, setBackup] = useState(editing?.backupRoomId ?? "none");
   const [name, setName] = useState(editing?.activityName ?? "");
   const [description, setDescription] = useState(editing?.description ?? "");
@@ -175,7 +173,7 @@ function BookingFormDialog({
       setBuilding(firstBuilding?.id ?? "");
     }
   }, [campus, editing, editingRoom, editingBuilding, store.campuses, store.buildings]);
-  const timeError = bookingTimeError(start, end);
+  const timeError = bookingTimeError(start, end, { earliestMinute: store.bookingHours.start * 60, latestMinute: store.bookingHours.end * 60 });
   const validTime = timeError === null;
   const validCount = Number.isInteger(Number(count)) && Number(count) > 0;
   const changeStart = (value: string) => {
@@ -191,7 +189,7 @@ function BookingFormDialog({
         : 2 * 60 * 60_000;
       const nextEnd = new Date(nextStart.getTime() + duration);
       const closing = new Date(nextStart);
-      closing.setHours(21, 0, 0, 0);
+    closing.setHours(store.bookingHours.end, 0, 0, 0);
       setEnd(toLocalInput(new Date(Math.min(nextEnd.getTime(), closing.getTime())).toISOString()));
     }
   };
@@ -223,14 +221,12 @@ function BookingFormDialog({
         if (cancelled) return;
         setRemoteAvailableIds(ids);
         if (room && !ids.includes(room)) setRoom("");
-        setExtraRooms((current) => current.filter((id) => ids.includes(id)));
         if (backup !== "none" && !ids.includes(backup)) setBackup("none");
       })
       .catch(() => {
         if (cancelled) return;
         setRemoteAvailableIds([]);
         setRoom("");
-        setExtraRooms([]);
         setBackup("none");
         toast.error("Không thể kiểm tra phòng khả dụng theo thời gian đã chọn");
       })
@@ -247,10 +243,10 @@ function BookingFormDialog({
     const first = store.buildings.find((b) => b.campusId === value);
     setBuilding(first?.id ?? "");
     setRoom("");
-    setExtraRooms([]);
     setBackup("none");
   };
   const submit = async () => {
+    if (editing?.scanUploadedAt && !window.confirm("Sửa đơn sẽ làm bản scan đã nộp mất hiệu lực. Bạn cần tải bản scan mới sau khi lưu. Tiếp tục?")) return;
     const nextErrors: Record<string, string> = {};
     if (timeError) nextErrors.time = timeError;
     if (!campus) nextErrors.campus = "Vui lòng chọn cơ sở.";
@@ -259,7 +255,7 @@ function BookingFormDialog({
     if (!name.trim()) nextErrors.name = "Vui lòng nhập tên hoạt động.";
     if (!description.trim()) nextErrors.description = "Vui lòng nhập mục đích hoặc mô tả.";
     if (!Number.isInteger(Number(count)) || Number(count) < 1) nextErrors.count = "Số người phải là số nguyên lớn hơn 0.";
-    const tooSmall = selectedRooms.map((id) => store.rooms.find((item) => item.id === id)).find((item) => item?.capacity != null && Number(count) > item.capacity);
+    const tooSmall = store.rooms.find((item) => item.id === room && item.capacity != null && Number(count) > item.capacity);
     if (tooSmall) nextErrors.count = `Phòng ${tooSmall.name} không đủ sức chứa ${count} người.`;
     if (!contactPerson.trim()) nextErrors.contactPerson = "Vui lòng nhập người đại diện.";
     if (!contactPhone.trim()) nextErrors.contactPhone = "Vui lòng nhập số điện thoại.";
@@ -293,11 +289,9 @@ function BookingFormDialog({
         }
         toast.success("Đã cập nhật đơn");
       } else {
-        const created = selectedRooms.length > 1
-          ? await store.addBatchBooking(data, selectedRooms)
-          : [await store.addBooking(data)];
-        toast.success(`Đã giữ ${created.length} phòng; hạn nộp scan ${created[0].scanDeadlineAt ? new Date(created[0].scanDeadlineAt).toLocaleString("vi-VN") : "theo hệ thống"}.`);
-        onCreated(created[0]);
+        const created = await store.addBooking(data);
+        toast.success(`Đã giữ phòng; hạn nộp scan ${created.scanDeadlineAt ? new Date(created.scanDeadlineAt).toLocaleString("vi-VN") : "theo hệ thống"}.`);
+        onCreated(created);
       }
       close();
     } catch {
@@ -313,7 +307,7 @@ function BookingFormDialog({
     monday.setHours(0, 0, 0, 0);
     monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) + 7);
     const endOfSecondWeek = new Date(monday);
-    endOfSecondWeek.setDate(endOfSecondWeek.getDate() + 13);
+    endOfSecondWeek.setDate(endOfSecondWeek.getDate() + 14);
     if (start && (new Date(start) < monday || new Date(start) >= endOfSecondWeek || new Date(start).getDay() === 0)) next.time = "CLB chỉ đăng ký từ thứ Hai đến thứ Bảy của hai tuần kế tiếp.";
     if (!validCount) next.count = "Số người phải là số nguyên lớn hơn 0.";
     if (!name.trim()) next.name = "Vui lòng nhập tên hoạt động.";
@@ -325,7 +319,6 @@ function BookingFormDialog({
     if (!Object.keys(next).length) setStep(2);
   };
   const saveDraft = async () => {
-    if (extraRooms.length) return toast.error("Bản nháp chỉ giữ một phòng. Gửi đơn để đăng ký nhiều phòng cùng lúc.");
     if (room && timeError) return toast.error(timeError);
     if (room && !validCount) return toast.error("Số người phải lớn hơn 0 để giữ phòng.");
     setSubmitting(true);
@@ -404,7 +397,6 @@ function BookingFormDialog({
                 onValueChange={(v) => {
                   setBuilding(v);
                   setRoom("");
-                  setExtraRooms([]);
                   setBackup("none");
                 }}
               >
@@ -422,16 +414,16 @@ function BookingFormDialog({
               {errors.building && <p className="text-sm text-red-600">{errors.building}</p>}
             </div>
             <div className="grid gap-2 sm:col-span-2">
-              <Label>{editing ? "Đổi phòng cho đơn này" : "Chọn một hoặc nhiều phòng"}</Label>
-              <p className="text-xs text-slate-600">{editing ? "Mỗi dòng đơn đã gửi được chỉnh riêng." : "Ấn từng phòng để chọn hoặc bỏ chọn."} Xanh: còn trống · Xám: đã bận/không đủ sức chứa · Viền xanh: đã chọn.</p>
+              <Label>Chọn một phòng</Label>
+              <p className="text-xs text-slate-600">Xanh: còn trống · Xám: đã bận/không đủ sức chứa · Viền xanh: đã chọn.</p>
               {loadingRooms && <p className="text-sm">Đang kiểm tra phòng trống...</p>}
               <div className="grid grid-cols-2 gap-2 rounded-lg border bg-slate-50 p-3 sm:grid-cols-4">
-                {buildingRooms.map((item) => { const free = remoteAvailableIds?.includes(item.id) ?? false; const chosen = selectedRooms.includes(item.id); return <button key={item.id} type="button" disabled={!free} aria-pressed={chosen} onClick={() => { if (editing) { setRoom(item.id); setExtraRooms([]); } else if (chosen) { if (room === item.id) { setRoom(extraRooms[0] ?? ""); setExtraRooms(extraRooms.slice(1)); } else setExtraRooms(extraRooms.filter((id) => id !== item.id)); } else if (!room) setRoom(item.id); else setExtraRooms((current) => [...current, item.id]); if (backup === item.id) setBackup("none"); }} className={`min-h-20 rounded-lg border-2 px-3 py-2 text-left text-sm transition ${chosen ? "border-blue-700 bg-blue-100 text-blue-900" : free ? "border-emerald-300 bg-emerald-50 hover:border-emerald-600" : "cursor-not-allowed border-slate-200 bg-slate-200 text-slate-500"}`}><b className="block">{item.name}</b><span>{chosen ? "Đã chọn" : free ? "Còn trống" : "Đã bận / không phù hợp"}</span><span className="block text-xs">{item.capacity ?? "?"} người</span></button>; })}
+                {buildingRooms.map((item) => { const free = remoteAvailableIds?.includes(item.id) ?? false; const chosen = room === item.id; return <button key={item.id} type="button" disabled={!free} aria-pressed={chosen} onClick={() => { setRoom(chosen ? "" : item.id); if (backup === item.id) setBackup("none"); }} className={`min-h-20 rounded-lg border-2 px-3 py-2 text-left text-sm transition ${chosen ? "border-blue-700 bg-blue-100 text-blue-900" : free ? "border-emerald-300 bg-emerald-50 hover:border-emerald-600" : "cursor-not-allowed border-slate-200 bg-slate-200 text-slate-500"}`}><b className="block">{item.name}</b><span>{chosen ? "Đã chọn" : free ? "Còn trống" : "Đã bận / không phù hợp"}</span><span className="block text-xs">{item.capacity ?? "?"} người</span></button>; })}
               </div>
               {errors.room && <p className="text-sm text-red-600">{errors.room}</p>}
             </div>
-            <div className={selectedRooms.length > 1 ? "hidden" : "grid gap-2"}>
-              <Label>Phòng dự phòng</Label>
+            <div className="grid gap-2">
+              <Label>Phòng dự phòng (không giữ chỗ)</Label>
               <Select value={backup} onValueChange={setBackup}>
                 <SelectTrigger className="w-full">
                   <SelectValue />
@@ -583,6 +575,8 @@ function BookingDetailDialog({
                 <p className="font-medium">Bản scan đơn đã ký</p>
                 <p className="text-xs text-slate-600">Nộp trước {booking.scanDeadlineAt ? new Date(booking.scanDeadlineAt).toLocaleString("vi-VN") : "hạn do cán bộ đặt"}. Chấp nhận PDF/JPG/PNG tối đa 5 MB.</p>
                 <p className="text-xs text-slate-600">Bản cứng: trước {booking.paperDeadlineAt ? new Date(booking.paperDeadlineAt).toLocaleString("vi-VN") : "hạn do cán bộ đặt"}.</p>
+                {booking.scanReuploadRequestedAt && <p className="text-sm font-medium text-amber-700">Cán bộ yêu cầu nộp lại scan. {booking.scanReuploadReason}</p>}
+                {booking.physicalStatus === "chua_nhan" && booking.paperDeadlineAt && new Date(booking.paperDeadlineAt) < new Date() && <p className="text-sm text-red-700">Đã quá hạn bản cứng. Vui lòng liên hệ cán bộ để được xử lý, đơn chưa tự hủy theo mốc này.</p>}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   {booking.scanFileName && <Button size="sm" variant="outline" onClick={() => { void openBookingScan(booking!.id).catch(() => toast.error("Không thể mở bản scan.")); }}>Xem bản scan</Button>}
                   {booking.scanUploadedAt && <span className="text-xs text-emerald-700">{booking.scanConfirmedAt ? "Cán bộ đã xác nhận scan" : "Đã tải scan, chờ cán bộ xác nhận"}</span>}
@@ -728,6 +722,7 @@ export function ClubDashboard() {
   const [formOpen, setFormOpen] = useState(false),
     [editing, setEditing] = useState<Booking | null>(null),
     [cancel, setCancel] = useState<Booking | null>(null),
+    [cancelReason, setCancelReason] = useState(""),
     [detail, setDetail] = useState<Booking | null>(null),
     [mauABooking, setMauABooking] = useState<Booking | null>(null),
     [mauAOpen, setMauAOpen] = useState(false);
@@ -907,7 +902,7 @@ export function ClubDashboard() {
                             <p className="text-xs text-slate-500">
                               {fmt(b.startAt)}
                             </p>
-                            {b.applicationGroup && <p className="text-xs text-blue-700">Lượt mượn nhiều phòng · {b.applicationGroup.slice(0, 8)}</p>}
+                              {b.scanReuploadRequestedAt && <p className="text-xs text-amber-700">Cần nộp lại scan</p>}
                           </TableCell>
                           <TableCell>
                             <PhysicalStatusBadge status={b.physicalStatus} />
@@ -936,7 +931,8 @@ export function ClubDashboard() {
                                 <Download />
                                 Mẫu A
                               </Button>}
-                              {b.scanUploadedAt ? <Button size="sm" variant="outline" onClick={() => { void openBookingScan(b.id).catch(() => toast.error("Không thể mở bản scan.")); }}>Xem scan</Button> : ["pending_hold", "needs_revision"].includes(b.status) ? <Button size="sm" variant="outline" onClick={() => setDetail(b)}>Nộp scan</Button> : null}
+                              {b.scanUploadedAt ? <><Button size="sm" variant="outline" onClick={() => { void openBookingScan(b.id).catch(() => toast.error("Không thể mở bản scan.")); }}>Xem scan</Button>{["pending_hold", "needs_revision"].includes(b.status) && <Button size="sm" variant="outline" onClick={() => setDetail(b)}>Thay scan</Button>}</> : ["pending_hold", "needs_revision"].includes(b.status) ? <Button size="sm" variant="outline" onClick={() => setDetail(b)}>Nộp scan</Button> : null}
+                              {b.physicalStatus === "da_nhan_ban_cung" && ["pending_hold", "needs_revision", "approved", "room_changed"].includes(b.status) && <Button size="sm" variant="outline" onClick={() => { setCancel(b); setCancelReason(""); }}>Yêu cầu hủy</Button>}
                               {[
                                 "draft",
                                 "pending_hold",
@@ -959,12 +955,12 @@ export function ClubDashboard() {
                                         Sửa đơn
                                       </DropdownMenuItem>
                                     )}
-                                    <DropdownMenuItem
+                                    {b.physicalStatus !== "da_nhan_ban_cung" && <DropdownMenuItem
                                       variant="destructive"
                                       onClick={() => setCancel(b)}
                                     >
                                       Hủy đơn
-                                    </DropdownMenuItem>
+                                    </DropdownMenuItem>}
                                   </DropdownMenuContent>
                                 </DropdownMenu>
                               )}
@@ -998,11 +994,12 @@ export function ClubDashboard() {
       <Dialog open={!!cancel} onOpenChange={(v) => !v && setCancel(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Hủy đơn {cancel?.id}?</DialogTitle>
+            <DialogTitle>{cancel?.physicalStatus === "da_nhan_ban_cung" ? "Yêu cầu cán bộ hủy đơn" : "Hủy đơn"} {cancel?.id}?</DialogTitle>
             <DialogDescription>
-              Phòng sẽ được mở lại cho CLB khác đăng ký.
+              {cancel?.physicalStatus === "da_nhan_ban_cung" ? "Đơn đã nhận bản cứng. Hãy nêu lý do để cán bộ xem xét và hủy theo quyền admin. Phòng chưa được trả ngay." : "Phòng sẽ được mở lại cho CLB khác đăng ký."}
             </DialogDescription>
           </DialogHeader>
+          {cancel?.physicalStatus === "da_nhan_ban_cung" && <Input aria-label="Lý do yêu cầu hủy" placeholder="Lý do yêu cầu hủy" value={cancelReason} onChange={(event) => setCancelReason(event.target.value)} />}
           <DialogFooter>
             <Button variant="outline" onClick={() => setCancel(null)}>
               Giữ đơn
@@ -1011,13 +1008,13 @@ export function ClubDashboard() {
               variant="destructive"
               onClick={async () => {
                 if (cancel) {
-                  await store.cancelBooking(cancel.id);
-                  toast.success("Đã hủy đơn và trả phòng");
+                  if (cancel.physicalStatus === "da_nhan_ban_cung") { if (!cancelReason.trim()) return toast.error("Vui lòng nhập lý do hủy."); await store.requestCancelBooking(cancel.id, cancelReason.trim()); toast.success("Đã gửi yêu cầu cho cán bộ."); }
+                  else { await store.cancelBooking(cancel.id); toast.success("Đã hủy đơn và trả phòng"); }
                 }
                 setCancel(null);
               }}
             >
-              Xác nhận hủy
+              {cancel?.physicalStatus === "da_nhan_ban_cung" ? "Gửi cho cán bộ" : "Xác nhận hủy"}
             </Button>
           </DialogFooter>
         </DialogContent>

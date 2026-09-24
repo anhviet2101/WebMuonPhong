@@ -69,13 +69,12 @@ export function bookingTimeError(
     return "Giờ bắt đầu và kết thúc phải cùng một ngày.";
   if (endDate <= startDate) return "Giờ kết thúc phải sau giờ bắt đầu.";
   if (startDate.getDay() === 0) return "Không nhận đăng ký mượn phòng vào Chủ nhật.";
-  if (endDate.getHours() * 60 + endDate.getMinutes() > 21 * 60)
-    return "Đơn mượn phòng phải kết thúc trước hoặc đúng 21:00.";
-  if (bounds) {
+  {
+    const limits = bounds ?? { earliestMinute: 7 * 60, latestMinute: 21 * 60 };
     const startMinute = startDate.getHours() * 60 + startDate.getMinutes();
     const endMinute = endDate.getHours() * 60 + endDate.getMinutes();
-    if (startMinute < bounds.earliestMinute || endMinute > bounds.latestMinute)
-      return `Vui lòng chọn trong khoảng ${String(Math.floor(bounds.earliestMinute / 60)).padStart(2, "0")}:${String(bounds.earliestMinute % 60).padStart(2, "0")}–${String(Math.floor(bounds.latestMinute / 60)).padStart(2, "0")}:${String(bounds.latestMinute % 60).padStart(2, "0")}.`;
+    if (startMinute < limits.earliestMinute || endMinute > limits.latestMinute)
+      return `Vui lòng chọn trong khoảng ${String(Math.floor(limits.earliestMinute / 60)).padStart(2, "0")}:${String(limits.earliestMinute % 60).padStart(2, "0")}–${String(Math.floor(limits.latestMinute / 60)).padStart(2, "0")}:${String(limits.latestMinute % 60).padStart(2, "0")}.`;
   }
   return null;
 }

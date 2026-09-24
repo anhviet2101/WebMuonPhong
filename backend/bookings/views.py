@@ -1,6 +1,6 @@
 
 from copy import copy
-from uuid import uuid4
+from datetime import timedelta
 import re
 from django.http import HttpResponse
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
@@ -70,6 +70,7 @@ from backend.bookings.services import booking_service
 
 CONFLICT_STATUSES = [
     BookingStatus.PENDING_HOLD.value,
+    BookingStatus.NEEDS_REVISION.value,
     BookingStatus.APPROVED.value,
     BookingStatus.ROOM_CHANGED.value,
 ]
@@ -592,7 +593,6 @@ class BookingViewSet(
     def get_permissions(self):
         action_permissions = {
             "create": [IsAuthenticated(), HasPermission("booking.create")],
-            "create_batch": [IsAuthenticated(), HasPermission("booking.create")],
             "create_draft": [IsAuthenticated(), HasPermission("booking.create")],
             "submit": [IsAuthenticated(), HasPermission("booking.create")],
             "update_and_submit": [IsAuthenticated(), HasPermission("booking.create")],
@@ -648,33 +648,6 @@ class BookingViewSet(
             raise ValidationError("Phòng đã có lịch trùng trong khoảng thời gian này.") from exc
         return Response(self.get_serializer(booking).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=False, methods=["post"], url_path="batch")
-    def create_batch(self, request):
-        """Create one multi-room request atomically, one collision-safe booking per room."""
-        room_ids = request.data.get("room_ids")
-        if not isinstance(room_ids, list) or not 2 <= len(room_ids) <= 20 or any(type(value) is not int or value < 1 for value in room_ids) or len(set(room_ids)) != len(room_ids):
-            raise ValidationError({"room_ids": "Chọn từ 2 đến 20 phòng khác nhau."})
-        payload = {key: value for key, value in request.data.items() if key != "room_ids"}
-        group = uuid4()
-        bookings = []
-        try:
-            with transaction.atomic():
-                booking_service.release_expired_drafts()
-                for room_id in room_ids:
-                    serializer = self.get_serializer(data={**payload, "room": room_id, "secondary_room": None})
-                    serializer.is_valid(raise_exception=True)
-                    booking = serializer.save()
-                    booking.application_group = group
-                    booking.save(update_fields=["application_group", "updated_at"])
-                    bookings.append(booking_service.submit_booking(booking, request.user))
-        except DjangoValidationError as exc:
-            raise ValidationError(_serialize_django_validation_error(exc)) from exc
-        except DjangoPermissionDenied as exc:
-            raise PermissionDenied(str(exc)) from exc
-        except IntegrityError as exc:
-            raise ValidationError("Một trong các phòng đã có lịch trùng. Không phòng nào được giữ.") from exc
-        return Response(self.get_serializer(bookings, many=True).data, status=status.HTTP_201_CREATED)
-
     @action(detail=False, methods=["post"], url_path="drafts")
     def create_draft(self, request):
         serializer = self.get_serializer(data=request.data)
@@ -713,6 +686,8 @@ class BookingViewSet(
 
     def perform_update(self, serializer):
         booking = self.get_object()
+        if booking.physical_status == PhysicalStatus.DA_NHAN_BAN_CUNG:
+            raise PermissionDenied("Đơn đã nhận bản cứng, không thể sửa nội dung. Cán bộ có thể hủy và tạo đơn mới.")
         if not is_admin(self.request.user) and booking.status not in {
             BookingStatus.DRAFT,
             BookingStatus.PENDING_HOLD,
@@ -740,7 +715,26 @@ class BookingViewSet(
             with transaction.atomic():
                 booking_service.release_expired_drafts()
                 previous = copy(booking) if booking.status == BookingStatus.DRAFT else None
+                document_fields = ("room_id", "secondary_room_id", "start_time", "end_time", "activity_name", "description", "participant_count", "contact_person", "contact_phone", "contact_email", "notes", "equipment_request")
+                old_document = {field: getattr(booking, field) for field in document_fields}
                 instance = serializer.save()
+                changed_document_fields = any(
+                    old_document[field] != getattr(instance, field)
+                    for field in document_fields
+                )
+                if changed_document_fields and instance.scan_uploaded_at and instance.physical_status == PhysicalStatus.CHUA_NHAN:
+                    instance.scan_data = None
+                    instance.scan_file_name = ""
+                    instance.scan_content_type = ""
+                    instance.scan_uploaded_at = None
+                    instance.scan_confirmed_at = None
+                    instance.scan_confirmed_by = None
+                    instance.scan_reupload_requested_at = timezone.now()
+                    instance.scan_reupload_reason = "Thông tin đơn đã thay đổi; cần nộp bản scan mới."
+                    instance.scan_deadline_at = timezone.now() + timedelta(hours=booking_service._get_business_rule_int(booking_service.SCAN_REUPLOAD_HOURS_KEY, 24))
+                    instance.hold_expires_at = instance.scan_deadline_at
+                    if instance.status == BookingStatus.NEEDS_REVISION:
+                        instance.status = BookingStatus.PENDING_HOLD
                 if instance.status == BookingStatus.DRAFT:
                     booking_service.prepare_draft_hold(instance, previous, actor=self.request.user)
                 instance.full_clean()
@@ -840,6 +834,23 @@ class BookingViewSet(
             serializer.validated_data.get("reason"),
         )
 
+    @action(detail=True, methods=["post"], url_path="request-cancel")
+    def request_cancel(self, request, pk=None):
+        booking = self.get_object()
+        if is_admin(request.user):
+            raise ValidationError("Cán bộ có thể hủy đơn trực tiếp.")
+        if booking.physical_status != PhysicalStatus.DA_NHAN_BAN_CUNG or booking.status not in {BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION, BookingStatus.APPROVED, BookingStatus.ROOM_CHANGED}:
+            raise ValidationError("Đơn này không ở trạng thái cần cán bộ hỗ trợ hủy.")
+        reason = str(request.data.get("reason", "")).strip()
+        if not reason:
+            raise ValidationError({"reason": "Vui lòng nhập lý do cần hủy."})
+        with transaction.atomic():
+            admins = User.objects.filter(Q(is_superuser=True) | Q(booking_profile__role__name__in=["YU_ADMIN", "SUPER_ADMIN"]), is_active=True).distinct()
+            for admin in admins:
+                Notification.objects.create(user=admin, type=Notification.NotificationType.CANCEL_REQUEST, related_booking=booking, message=f"CLB {booking.organization.name} yêu cầu cán bộ hủy đơn {booking.pk}. Lý do: {reason}")
+            AuditLog.objects.create(user=request.user, action="request_cancel", entity_type="Booking", entity_id=str(booking.pk), new_value={"reason": reason})
+        return Response({"message": "Đã gửi yêu cầu hủy tới cán bộ. Đơn vẫn giữ nguyên cho đến khi cán bộ xử lý."})
+
     @action(detail=True, methods=["get", "post"], url_path="scan")
     def scan(self, request, pk=None):
         booking = self.get_object()
@@ -869,13 +880,36 @@ class BookingViewSet(
         booking.scan_uploaded_at = timezone.now()
         booking.scan_confirmed_at = None
         booking.scan_confirmed_by = None
-        booking.save(update_fields=["scan_data", "scan_content_type", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at", "scan_confirmed_by", "updated_at"])
-        if booking.application_group:
-            Booking.objects.filter(application_group=booking.application_group, status__in=[BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION]).exclude(pk=booking.pk).update(
-                scan_data=content, scan_content_type=mime, scan_file_name=booking.scan_file_name,
-                scan_uploaded_at=booking.scan_uploaded_at, scan_confirmed_at=None, scan_confirmed_by=None,
-            )
+        booking.scan_reupload_requested_at = None
+        booking.scan_reupload_reason = ""
+        booking.save(update_fields=["scan_data", "scan_content_type", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at", "scan_confirmed_by", "scan_reupload_requested_at", "scan_reupload_reason", "updated_at"])
         AuditLog.objects.create(user=request.user, action="upload_scan", entity_type="Booking", entity_id=str(booking.pk), new_value={"file_name": booking.scan_file_name})
+        return Response(self.get_serializer(booking).data)
+
+    @action(detail=True, methods=["post"], url_path="request-scan-reupload")
+    def request_scan_reupload(self, request, pk=None):
+        if not is_admin(request.user):
+            raise PermissionDenied("Chỉ cán bộ được yêu cầu nộp lại scan.")
+        with transaction.atomic():
+            booking = Booking.objects.select_for_update().get(pk=self.get_object().pk)
+            if booking.status not in {BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION} or booking.physical_status == PhysicalStatus.DA_NHAN_BAN_CUNG:
+                raise ValidationError("Đơn không còn ở bước xác nhận scan.")
+            if not booking.scan_uploaded_at:
+                raise ValidationError("Đơn chưa có bản scan để yêu cầu nộp lại.")
+            reason = str(request.data.get("reason", "")).strip()
+            booking.scan_data = None
+            booking.scan_file_name = ""
+            booking.scan_content_type = ""
+            booking.scan_uploaded_at = None
+            booking.scan_confirmed_at = None
+            booking.scan_confirmed_by = None
+            booking.scan_reupload_requested_at = timezone.now()
+            booking.scan_reupload_reason = reason
+            booking.scan_deadline_at = timezone.now() + timedelta(hours=booking_service._get_business_rule_int(booking_service.SCAN_REUPLOAD_HOURS_KEY, 24))
+            booking.hold_expires_at = booking.scan_deadline_at
+            booking.save()
+            Notification.objects.create(user=booking.created_by, type=Notification.NotificationType.NEEDS_REVISION, related_booking=booking, message=f"Đơn {booking.pk} cần nộp lại bản scan trước {timezone.localtime(booking.scan_deadline_at):%d/%m/%Y %H:%M}. {reason}")
+            AuditLog.objects.create(user=request.user, action="request_scan_reupload", entity_type="Booking", entity_id=str(booking.pk), new_value={"reason": reason, "deadline": booking.scan_deadline_at.isoformat()})
         return Response(self.get_serializer(booking).data)
 
     @action(detail=True, methods=["post"], url_path="confirm-scan")
@@ -886,8 +920,6 @@ class BookingViewSet(
         booking.scan_confirmed_at = timezone.now()
         booking.scan_confirmed_by = request.user
         booking.save(update_fields=["scan_confirmed_at", "scan_confirmed_by", "updated_at"])
-        if booking.application_group:
-            Booking.objects.filter(application_group=booking.application_group, scan_uploaded_at__isnull=False).update(scan_confirmed_at=booking.scan_confirmed_at, scan_confirmed_by=request.user)
         AuditLog.objects.create(user=request.user, action="confirm_scan", entity_type="Booking", entity_id=str(booking.pk))
         return Response(self.get_serializer(booking).data)
 
@@ -900,10 +932,6 @@ class BookingViewSet(
         booking.physical_confirmed_at = timezone.now()
         booking.physical_confirmed_by = request.user
         booking.save(update_fields=["physical_status", "physical_confirmed_at", "physical_confirmed_by", "updated_at"])
-        if booking.application_group:
-            Booking.objects.filter(application_group=booking.application_group, status__in=[BookingStatus.PENDING_HOLD, BookingStatus.NEEDS_REVISION]).update(
-                physical_status=booking.physical_status, physical_confirmed_at=booking.physical_confirmed_at, physical_confirmed_by=request.user,
-            )
         AuditLog.objects.create(user=request.user, action="confirm_physical", entity_type="Booking", entity_id=str(booking.pk))
         return Response(self.get_serializer(booking).data)
 

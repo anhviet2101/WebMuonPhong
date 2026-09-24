@@ -133,6 +133,9 @@ class BookingApiTests(APITestCase):
         }
 
     def setUp(self):
+        clock = patch("django.utils.timezone.now", return_value=timezone.make_aware(datetime(2026, 9, 21, 9)))
+        clock.start()
+        self.addCleanup(clock.stop)
         self.client = APIClient()
         self.organization = Organization.objects.create(
             name="CLB A",
@@ -272,38 +275,28 @@ class BookingApiTests(APITestCase):
         payload.update(start_time=start.isoformat(), end_time=(start + timedelta(hours=2)).isoformat())
         self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
 
-    def test_multi_room_request_is_atomic_and_one_scan_covers_group(self):
-        second = Room.objects.create(building=self.room.building, name="102", floor=1, capacity=50)
-        BusinessRuleConfig.objects.create(key="max_bookings_per_week_per_org", value=1)
+    def test_batch_registration_is_unavailable(self):
         self.client.force_authenticate(self.user)
-        payload = {**self._draft_payload(), "room_ids": [self.room.id, second.id]}
-        created = self.client.post(reverse("booking-create-batch"), payload, format="json")
-        self.assertEqual(created.status_code, 201, created.data)
-        self.assertEqual(len(created.data), 2)
-        self.assertEqual(created.data[0]["application_group"], created.data[1]["application_group"])
-        third = Room.objects.create(building=self.room.building, name="103", floor=1, capacity=50)
-        self.assertEqual(self.client.post(reverse("booking-list"), {**self._draft_payload(), "room": third.id}, format="json").status_code, 400)
-        uploaded = self.client.post(reverse("booking-scan", args=[created.data[0]["id"]]), {"file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4\n%%EOF", content_type="application/pdf")}, format="multipart")
-        self.assertEqual(uploaded.status_code, 200, uploaded.data)
-        self.assertIsNotNone(Booking.objects.get(pk=created.data[1]["id"]).scan_uploaded_at)
-        self.assertEqual(self.client.get(reverse("booking-scan", args=[created.data[1]["id"]])).content, b"%PDF-1.4\n%%EOF")
-        self.client.force_authenticate(self.other_user)
-        self.assertEqual(self.client.get(reverse("booking-scan", args=[created.data[0]["id"]])).status_code, 404)
-        admin = User.objects.create_superuser("batch-admin", "batch@example.com", "password")
-        self.client.force_authenticate(admin)
-        self.assertEqual(self.client.get(reverse("booking-scan", args=[created.data[0]["id"]])).status_code, 200)
-        self.assertEqual(self.client.post(reverse("booking-confirm-scan", args=[created.data[0]["id"]])).status_code, 200)
-        self.assertIsNotNone(Booking.objects.get(pk=created.data[1]["id"]).scan_confirmed_at)
+        self.assertEqual(self.client.post("/api/bookings/batch/", {**self._draft_payload(), "room_ids": [self.room.id]}, format="json").status_code, 405)
 
-    def test_multi_room_conflict_rolls_back_every_room(self):
-        second = Room.objects.create(building=self.room.building, name="102", floor=1, capacity=50)
-        existing = self._booking(room=second)
-        submit_booking(existing, self.user)
+    def test_second_week_saturday_is_allowed(self):
         self.client.force_authenticate(self.user)
-        payload = {**self._draft_payload(), "room_ids": [self.room.id, second.id]}
-        rejected = self.client.post(reverse("booking-create-batch"), payload, format="json")
-        self.assertEqual(rejected.status_code, 400)
-        self.assertEqual(Booking.objects.count(), 1)
+        with patch("django.utils.timezone.now", return_value=timezone.make_aware(datetime(2026, 9, 21, 9))):
+            start = timezone.make_aware(datetime(2026, 10, 3, 18))
+            payload = {**self._draft_payload(), "start_time": start.isoformat(), "end_time": (start + timedelta(hours=2)).isoformat()}
+            response = self.client.post(reverse("booking-list"), payload, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+
+    def test_after_thursday_cutoff_club_needs_staff_for_next_week(self):
+        self.client.force_authenticate(self.user)
+        with patch("django.utils.timezone.now", return_value=timezone.make_aware(datetime(2026, 9, 24, 16))):
+            payload = self._draft_payload()
+            blocked = self.client.post(reverse("booking-list"), payload, format="json")
+            self.assertEqual(blocked.status_code, 400)
+            second = self._future_weekday(7)
+            payload.update(start_time=second.isoformat(), end_time=(second + timedelta(hours=2)).isoformat())
+            allowed = self.client.post(reverse("booking-list"), payload, format="json")
+        self.assertEqual(allowed.status_code, 201, allowed.data)
 
     def test_paper_deadline_is_previous_thursday_at_fifteen(self):
         booking_start = self._future_weekday(5)
@@ -348,6 +341,110 @@ class BookingApiTests(APITestCase):
         self.assertEqual(self.client.post(reverse("booking-confirm-physical", args=[booking_id])).status_code, 200)
         self.assertEqual(self.client.post(reverse("booking-approve", args=[booking_id])).status_code, 200)
         self.assertIsNone(Booking.objects.get(pk=booking_id).scan_uploaded_at)
+
+    def test_edit_after_scan_requires_new_scan(self):
+        self.client.force_authenticate(self.user)
+        created = self.client.post(reverse("booking-list"), self._draft_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        booking_id = created.data["id"]
+        uploaded = self.client.post(reverse("booking-scan", args=[booking_id]), {"file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4\n%%EOF", content_type="application/pdf")}, format="multipart")
+        self.assertEqual(uploaded.status_code, 200, uploaded.data)
+        updated = self.client.patch(reverse("booking-detail", args=[booking_id]), {"activity_name": "Updated event"}, format="json")
+        self.assertEqual(updated.status_code, 200, updated.data)
+        booking = Booking.objects.get(pk=booking_id)
+        self.assertIsNone(booking.scan_uploaded_at)
+        self.assertIsNone(booking.scan_data)
+        self.assertIsNotNone(booking.scan_reupload_requested_at)
+        self.assertEqual(booking.status, BookingStatus.PENDING_HOLD)
+
+        self.client.post(reverse("booking-scan", args=[booking_id]), {"file": SimpleUploadedFile("resigned.pdf", b"%PDF-1.4\n%%EOF", content_type="application/pdf")}, format="multipart")
+        admin = User.objects.create_superuser("revision-admin", "revision@example.com", "password")
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.post(reverse("booking-request-revision", args=[booking_id]), {"reason": "Sửa nội dung"}, format="json").status_code, 200)
+        self.client.force_authenticate(self.user)
+        revised = self.client.patch(reverse("booking-detail", args=[booking_id]), {"activity_name": "Revised event"}, format="json")
+        self.assertEqual(revised.status_code, 200, revised.data)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, BookingStatus.PENDING_HOLD)
+        self.assertIsNone(booking.scan_uploaded_at)
+
+    def test_staff_can_require_scan_reupload_and_expire_missing_reupload(self):
+        self.client.force_authenticate(self.user)
+        created = self.client.post(reverse("booking-list"), self._draft_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        booking_id = created.data["id"]
+        self.client.post(reverse("booking-scan", args=[booking_id]), {"file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4\n%%EOF", content_type="application/pdf")}, format="multipart")
+        admin = User.objects.create_superuser("scan-reviewer", "reviewer@example.com", "password")
+        self.client.force_authenticate(admin)
+        response = self.client.post(reverse("booking-request-scan-reupload", args=[booking_id]), {"reason": "Scan mờ"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        booking = Booking.objects.get(pk=booking_id)
+        self.assertIsNone(booking.scan_uploaded_at)
+        self.assertEqual(booking.scan_reupload_reason, "Scan mờ")
+        booking.scan_deadline_at = timezone.now() - timedelta(minutes=1)
+        booking.hold_expires_at = booking.scan_deadline_at
+        booking.save(update_fields=["scan_deadline_at", "hold_expires_at"])
+        self.assertEqual(auto_expire_unsubmitted_bookings(), 1)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, BookingStatus.EXPIRED)
+
+    def test_hard_copy_requires_staff_cancellation(self):
+        self.client.force_authenticate(self.user)
+        created = self.client.post(reverse("booking-list"), self._draft_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        booking_id = created.data["id"]
+        admin = User.objects.create_superuser("cancel-reviewer", "cancel@example.com", "password")
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.post(reverse("booking-confirm-physical", args=[booking_id])).status_code, 200)
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.post(reverse("booking-cancel", args=[booking_id])).status_code, 403)
+        requested = self.client.post(reverse("booking-request-cancel", args=[booking_id]), {"reason": "Không tổ chức nữa"}, format="json")
+        self.assertEqual(requested.status_code, 200, requested.data)
+        self.assertTrue(Notification.objects.filter(user=admin, related_booking_id=booking_id, type=Notification.NotificationType.CANCEL_REQUEST).exists())
+        self.assertEqual(Booking.objects.get(pk=booking_id).status, BookingStatus.PENDING_HOLD)
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.post(reverse("booking-cancel", args=[booking_id]), {"reason": "Theo yêu cầu CLB"}, format="json").status_code, 200)
+
+    def test_revision_keeps_room_and_is_forbidden_after_hard_copy(self):
+        self.client.force_authenticate(self.user)
+        created = self.client.post(reverse("booking-list"), self._draft_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        booking_id = created.data["id"]
+        admin = User.objects.create_superuser("revision-reviewer", "revision@example.com", "password")
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.post(reverse("booking-request-revision", args=[booking_id]), {"reason": "Bổ sung thông tin"}, format="json").status_code, 200)
+        params = {"start_time": self._draft_payload()["start_time"], "end_time": self._draft_payload()["end_time"]}
+        available = self.client.get(reverse("room-available"), params)
+        self.assertNotIn(self.room.id, [room["id"] for room in available.data])
+        self.assertEqual(self.client.post(reverse("booking-confirm-physical", args=[booking_id])).status_code, 200)
+        self.assertEqual(self.client.post(reverse("booking-request-revision", args=[booking_id]), {"reason": "Sửa lại"}, format="json").status_code, 400)
+
+    def test_recurring_blackout_blocks_weekly_occurrence_and_can_be_removed(self):
+        first = self._future_weekday()
+        second = first + timedelta(days=7)
+        admin = User.objects.create_superuser("blackout-reviewer", "blackout@example.com", "password")
+        self.client.force_authenticate(admin)
+        created = self.client.post(reverse("blackout-list"), {"scope_type": "room", "room_ids": [self.room.id], "start_time": first.isoformat(), "end_time": (first + timedelta(hours=2)).isoformat(), "is_recurring": True, "recurrence_rule": f"WEEKLY_UNTIL:{second.date().isoformat()}", "reason": "Thi định kỳ"}, format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        self.client.force_authenticate(self.user)
+        params = {"start_time": second.isoformat(), "end_time": (second + timedelta(hours=2)).isoformat()}
+        self.assertNotIn(self.room.id, [room["id"] for room in self.client.get(reverse("room-available"), params).data])
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.delete(reverse("blackout-detail", args=[created.data["id"]])).status_code, 204)
+        self.client.force_authenticate(self.user)
+        self.assertIn(self.room.id, [room["id"] for room in self.client.get(reverse("room-available"), params).data])
+
+    def test_configurable_booking_hours_are_enforced(self):
+        BusinessRuleConfig.objects.create(key="booking_start_hour", value=8)
+        BusinessRuleConfig.objects.create(key="booking_end_hour", value=20)
+        self.client.force_authenticate(self.user)
+        payload = self._draft_payload()
+        early = self._future_weekday().replace(hour=7)
+        payload.update(start_time=early.isoformat(), end_time=(early + timedelta(hours=2)).isoformat())
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 400)
+        start = self._future_weekday().replace(hour=8)
+        payload.update(start_time=start.isoformat(), end_time=(start + timedelta(hours=2)).isoformat())
+        self.assertEqual(self.client.post(reverse("booking-list"), payload, format="json").status_code, 201)
 
     def test_draft_without_room_has_no_expiry_and_is_hidden_from_admin_list(self):
         self.client.force_authenticate(self.user)
@@ -853,6 +950,10 @@ class BookingApiTests(APITestCase):
 
 class BookingConflictServiceTests(APITestCase):
     def setUp(self):
+        current = timezone.make_aware(datetime(2026, 9, 21, 9, 0))
+        clock = patch("django.utils.timezone.now", return_value=current)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.organization = Organization.objects.create(
             name="CLB",
             abbreviation="CLB",

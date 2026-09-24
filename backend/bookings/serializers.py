@@ -1,6 +1,7 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 import re
 from django.contrib.auth import get_user_model, password_validation
+from django.utils import timezone
 from rest_framework import serializers
 
 from backend.bookings.models import (
@@ -280,7 +281,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "physical_confirmed_at",
             "physical_confirmed_by",
             "hold_expires_at",
-            "scan_deadline_at", "paper_deadline_at", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at",
+            "scan_deadline_at", "paper_deadline_at", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at", "scan_reupload_requested_at", "scan_reupload_reason",
             "campus_id",
             "building_id",
             "created_by_id",
@@ -300,7 +301,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "physical_confirmed_at",
             "physical_confirmed_by",
             "hold_expires_at",
-            "scan_deadline_at", "paper_deadline_at", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at",
+            "scan_deadline_at", "paper_deadline_at", "scan_file_name", "scan_uploaded_at", "scan_confirmed_at", "scan_reupload_requested_at", "scan_reupload_reason",
             "campus_id",
             "building_id",
             "created_by_id",
@@ -393,6 +394,26 @@ class RoomBlackoutSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "created_by", "created_at"]
+
+    def validate(self, attrs):
+        start = attrs.get("start_time", getattr(self.instance, "start_time", None))
+        end = attrs.get("end_time", getattr(self.instance, "end_time", None))
+        if not start or not end or start >= end:
+            raise serializers.ValidationError("Khoảng thời gian khóa không hợp lệ.")
+        recurring = attrs.get("is_recurring", getattr(self.instance, "is_recurring", False))
+        rule = attrs.get("recurrence_rule", getattr(self.instance, "recurrence_rule", ""))
+        if recurring:
+            match = re.fullmatch(r"WEEKLY_UNTIL:(\d{4}-\d{2}-\d{2})", rule)
+            if not match:
+                raise serializers.ValidationError({"recurrence_rule": "Dùng dạng WEEKLY_UNTIL:YYYY-MM-DD."})
+            from datetime import date
+            try:
+                until = date.fromisoformat(match.group(1))
+            except ValueError as exc:
+                raise serializers.ValidationError({"recurrence_rule": "Ngày kết thúc lặp không hợp lệ."}) from exc
+            if timezone.localtime(start).date() != timezone.localtime(end).date() or until < timezone.localtime(start).date():
+                raise serializers.ValidationError({"recurrence_rule": "Khóa lặp hằng tuần phải trong một ngày và ngày kết thúc không trước lần đầu."})
+        return attrs
 
 
 class BusinessRuleConfigSerializer(serializers.ModelSerializer):

@@ -30,6 +30,9 @@ from backend.bookings.permissions import get_user_organization_id, user_has_perm
 PHYSICAL_SUBMISSION_DEADLINE_KEY = "physical_submission_deadline_hours"
 DEFAULT_PHYSICAL_SUBMISSION_DEADLINE_HOURS = 48
 SCAN_DEADLINE_HOURS_KEY = "scan_deadline_hours"
+SCAN_REUPLOAD_HOURS_KEY = "scan_reupload_hours"
+BOOKING_START_HOUR_KEY = "booking_start_hour"
+BOOKING_END_HOUR_KEY = "booking_end_hour"
 PAPER_CUTOFF_WEEKDAY_KEY = "paper_cutoff_weekday"
 PAPER_CUTOFF_HOUR_KEY = "paper_cutoff_hour"
 MIN_ADVANCE_HOURS_KEY = "min_advance_hours"
@@ -54,7 +57,7 @@ BLACKOUT_ROOM = BlackoutScopeType.ROOM.value
 BLACKOUT_BUILDING = BlackoutScopeType.BUILDING.value
 BLACKOUT_FLOOR = BlackoutScopeType.FLOOR.value
 
-CONFLICT_STATUSES = [PENDING_HOLD, APPROVED, ROOM_CHANGED]
+CONFLICT_STATUSES = [PENDING_HOLD, NEEDS_REVISION, APPROVED, ROOM_CHANGED]
 DRAFT_HOLD_HOURS = 1
 logger = logging.getLogger(__name__)
 
@@ -76,8 +79,13 @@ def validate_booking_window(start_time, end_time):
         raise ValidationError("Đơn mượn phòng phải bắt đầu và kết thúc trong cùng một ngày.")
     if start.weekday() == 6:
         raise ValidationError("Không nhận đăng ký mượn phòng vào Chủ nhật.")
-    if end.hour * 60 + end.minute > 21 * 60 or (end.hour == 21 and (end.second or end.microsecond)):
-        raise ValidationError("Thời gian mượn phòng phải kết thúc trước hoặc đúng 21:00.")
+    hours = _get_business_rule_ints({BOOKING_START_HOUR_KEY: 7, BOOKING_END_HOUR_KEY: 21})
+    opening = hours[BOOKING_START_HOUR_KEY]
+    closing = hours[BOOKING_END_HOUR_KEY]
+    if not 0 <= opening < closing <= 23:
+        raise ValidationError("Cấu hình giờ mượn phòng không hợp lệ.")
+    if start.hour < opening or end.hour > closing or (end.hour == closing and (end.minute or end.second or end.microsecond)):
+        raise ValidationError(f"Thời gian mượn phòng phải trong khoảng {opening:02d}:00–{closing:02d}:00.")
 
 
 def paper_deadline_for(start_time):
@@ -98,9 +106,11 @@ def validate_club_borrowing_policy(start_time, room, actor=None, policies=None):
     current = timezone.localdate()
     current_monday = current - timedelta(days=current.weekday())
     next_monday = current_monday + timedelta(days=7)
-    second_week_end = next_monday + timedelta(days=13)
+    second_week_end = next_monday + timedelta(days=14)
     if not next_monday <= requested < second_week_end or requested.weekday() == 6:
         raise ValidationError("CLB chỉ được đăng ký từ thứ Hai đến thứ Bảy của hai tuần kế tiếp.")
+    if requested < next_monday + timedelta(days=7) and timezone.now() > paper_deadline_for(start_time):
+        raise ValidationError("Đã qua hạn đăng ký tuần tới. Vui lòng liên hệ cán bộ đăng ký hộ.")
     if room is None:
         return
     week_key = (requested - timedelta(days=requested.weekday())).isoformat()
@@ -173,8 +183,7 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
         bookings_by_room.setdefault(room_id, []).append((booked_start, booked_end))
 
     blackouts = list(RoomBlackout.objects.filter(
-        start_time__lt=end_time + timedelta(minutes=max_after),
-        end_time__gt=start_time - timedelta(minutes=max_before),
+        Q(start_time__lt=end_time + timedelta(minutes=max_after), end_time__gt=start_time - timedelta(minutes=max_before)) | Q(is_recurring=True),
     ).filter(
         Q(scope_type=BLACKOUT_ROOM, room_ids__overlap=room_ids)
         | Q(scope_type__in=[BLACKOUT_BUILDING, BLACKOUT_FLOOR], building_id__in=[room.building_id for room in rooms])
@@ -197,8 +206,7 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
         ):
             continue
         if not any(
-            blackout.start_time < buffered_end
-            and blackout.end_time > buffered_start
+            _blackout_overlaps(blackout, buffered_start, buffered_end)
             and (
                 (blackout.scope_type == BLACKOUT_ROOM and room.pk in blackout.room_ids)
                 or (blackout.scope_type == BLACKOUT_BUILDING and blackout.building_id == room.building_id)
@@ -241,6 +249,7 @@ ALLOWED_TRANSITIONS = {
         PENDING_HOLD,
         APPROVED,
         CANCELLED,
+        EXPIRED,
     },
     PENDING_HOLD: {
         APPROVED,
@@ -390,6 +399,8 @@ def change_room(booking, new_room, user, reason=None):
                 locked_booking = _lock_booking(booking)
                 if locked_booking.status not in {PENDING_HOLD, NEEDS_REVISION, ROOM_CHANGED}:
                     raise ValidationError("Trạng thái đơn đã thay đổi. Vui lòng tải lại.")
+                if locked_booking.physical_status == CONFIRMED_RECEIVED:
+                    raise ValidationError("Đã nhận bản cứng, không thể đổi phòng; hãy hủy và tạo đơn mới.")
                 resolved_room = _resolve_room_for_update(new_room)
                 if resolved_room.pk == locked_booking.room_id:
                     raise ValidationError("Phòng mới phải khác phòng hiện tại.")
@@ -398,7 +409,20 @@ def change_room(booking, new_room, user, reason=None):
                 _validate_no_blackout_conflict(locked_booking, resolved_room)
                 old_value = _booking_audit_snapshot(locked_booking)
                 locked_booking.room = resolved_room
-                locked_booking.save(update_fields=["room", "updated_at"])
+                update_fields = ["room", "updated_at"]
+                if locked_booking.scan_uploaded_at:
+                    locked_booking.scan_data = None
+                    locked_booking.scan_file_name = ""
+                    locked_booking.scan_content_type = ""
+                    locked_booking.scan_uploaded_at = None
+                    locked_booking.scan_confirmed_at = None
+                    locked_booking.scan_confirmed_by = None
+                    locked_booking.scan_reupload_requested_at = timezone.now()
+                    locked_booking.scan_reupload_reason = "Đổi phòng; cần nộp bản scan mới."
+                    locked_booking.scan_deadline_at = timezone.now() + timedelta(hours=_get_business_rule_int(SCAN_REUPLOAD_HOURS_KEY, 24))
+                    locked_booking.hold_expires_at = locked_booking.scan_deadline_at
+                    update_fields.extend(["scan_data", "scan_file_name", "scan_content_type", "scan_uploaded_at", "scan_confirmed_at", "scan_confirmed_by", "scan_reupload_requested_at", "scan_reupload_reason", "scan_deadline_at", "hold_expires_at"])
+                locked_booking.save(update_fields=update_fields)
                 _create_audit_log(
                     booking=locked_booking,
                     user=user,
@@ -469,8 +493,13 @@ def _validate_transition(booking, target_status, user, reason, new_room):
         _ensure_room_can_be_booked(booking, booking.room)
         _validate_no_blackout_conflict(booking, booking.room)
 
+    if target_status == NEEDS_REVISION and booking.physical_status == CONFIRMED_RECEIVED:
+        raise ValidationError("Đã nhận bản cứng; không thể yêu cầu CLB sửa đơn. Cán bộ có thể hủy và hướng dẫn tạo đơn mới.")
+
     if target_status == ROOM_CHANGED and new_room is None:
         raise ValidationError("Cần truyền new_room khi đổi phòng.")
+    if target_status == ROOM_CHANGED and booking.physical_status == CONFIRMED_RECEIVED:
+        raise ValidationError("Đã nhận bản cứng, không thể đổi phòng; hãy hủy và tạo đơn mới.")
 
     if target_status == EXPIRED:
         _validate_expire_transition(booking)
@@ -490,6 +519,9 @@ def _validate_cancel_transition(booking, user, reason):
 
     if booking.status in {APPROVED, ROOM_CHANGED}:
         raise PermissionDenied("CLB chỉ được hủy booking trước khi được duyệt.")
+
+    if booking.physical_status == CONFIRMED_RECEIVED:
+        raise PermissionDenied("Đã nhận bản cứng. Vui lòng gửi yêu cầu để cán bộ hủy đơn.")
 
     if booking.status not in {
         DRAFT,
@@ -518,7 +550,8 @@ def _validate_complete_transition(booking):
 
 
 def _prepare_pending_hold(booking):
-    booking.scan_deadline_at = timezone.now() + timedelta(hours=_get_business_rule_int(SCAN_DEADLINE_HOURS_KEY, 24))
+    if not (booking.scan_reupload_requested_at and not booking.scan_uploaded_at and booking.scan_deadline_at and booking.scan_deadline_at > timezone.now()):
+        booking.scan_deadline_at = timezone.now() + timedelta(hours=_get_business_rule_int(SCAN_DEADLINE_HOURS_KEY, 24))
     booking.paper_deadline_at = paper_deadline_for(booking.start_time)
     booking.hold_expires_at = booking.scan_deadline_at
 
@@ -536,6 +569,17 @@ def _get_business_rule_int(key, default):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _get_business_rule_ints(defaults):
+    values = defaults.copy()
+    for key, raw in BusinessRuleConfig.objects.filter(key__in=defaults).values_list("key", "value"):
+        value = raw.get("value") if isinstance(raw, dict) else raw
+        try:
+            values[key] = int(value)
+        except (TypeError, ValueError):
+            pass
+    return values
 
 
 def _validate_business_rules(booking, actor=None):
@@ -567,14 +611,12 @@ def _validate_business_rules(booking, actor=None):
             Booking.objects.exclude(pk=booking.pk)
             .filter(
                 organization_id=booking.organization_id,
-                status__in=[PENDING_HOLD, APPROVED, ROOM_CHANGED],
+                status__in=CONFLICT_STATUSES,
                 start_time__gte=week_start,
                 start_time__lt=week_end,
             )
         )
-        if booking.application_group:
-            weekly_bookings = weekly_bookings.exclude(application_group=booking.application_group)
-        weekly_count = weekly_bookings.filter(application_group__isnull=True).count() + weekly_bookings.filter(application_group__isnull=False).values("application_group").distinct().count()
+        weekly_count = weekly_bookings.count()
         if weekly_count >= max_weekly:
             raise ValidationError(
                 f"CLB đã đạt tối đa {max_weekly} đơn trong tuần này."
@@ -613,11 +655,8 @@ def _validate_no_room_conflict(booking, room):
 
 def _validate_no_blackout_conflict(booking, room):
     buffered_start, buffered_end = _buffered_range_for_room(booking, room)
-    conflict_exists = (
-        RoomBlackout.objects.filter(
-            start_time__lt=buffered_end,
-            end_time__gt=buffered_start,
-        )
+    candidates = (
+        RoomBlackout.objects.filter(Q(start_time__lt=buffered_end, end_time__gt=buffered_start) | Q(is_recurring=True))
         .filter(
             Q(scope_type=BLACKOUT_ROOM, room_ids__contains=[room.pk])
             | Q(scope_type=BLACKOUT_BUILDING, building=room.building)
@@ -627,11 +666,33 @@ def _validate_no_blackout_conflict(booking, room):
                 floor=room.floor,
             )
         )
-        .exists()
     )
 
-    if conflict_exists:
+    if any(_blackout_overlaps(item, buffered_start, buffered_end) for item in candidates):
         raise ValidationError("Phòng đang bị khóa trong khoảng thời gian này.")
+
+
+def _blackout_overlaps(blackout, window_start, window_end):
+    if blackout.start_time < window_end and blackout.end_time > window_start:
+        return True
+    if not blackout.is_recurring or not blackout.recurrence_rule.startswith("WEEKLY_UNTIL:"):
+        return False
+    try:
+        until = datetime.strptime(blackout.recurrence_rule.split(":", 1)[1], "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    first_day = timezone.localtime(blackout.start_time).date()
+    if first_day > until or blackout.start_time >= window_end:
+        return False
+    week = max(0, (timezone.localtime(window_start).date() - first_day).days // 7 - 1)
+    while True:
+        occurrence_start = blackout.start_time + timedelta(weeks=week)
+        if timezone.localtime(occurrence_start).date() > until or occurrence_start >= window_end:
+            return False
+        occurrence_end = blackout.end_time + timedelta(weeks=week)
+        if occurrence_start < window_end and occurrence_end > window_start:
+            return True
+        week += 1
 
 
 def _ensure_room_can_be_booked(booking, room):
