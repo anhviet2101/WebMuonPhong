@@ -89,7 +89,7 @@ class Command(BaseCommand):
             base + timedelta(days=2, hours=2),
             base + timedelta(days=2, hours=4),
             BookingStatus.PENDING_HOLD,
-            PhysicalStatus.NOT_SUBMITTED,
+            PhysicalStatus.CHUA_NHAN,
         )
         self._booking(
             "Demo - Workshop truyền thông",
@@ -99,7 +99,7 @@ class Command(BaseCommand):
             base + timedelta(days=3, hours=3),
             base + timedelta(days=3, hours=6),
             BookingStatus.APPROVED,
-            PhysicalStatus.CONFIRMED_RECEIVED,
+            PhysicalStatus.DA_NHAN_BAN_CUNG,
         )
         self._booking(
             "Demo - Sinh hoạt chung",
@@ -109,7 +109,7 @@ class Command(BaseCommand):
             base + timedelta(days=5, hours=1),
             base + timedelta(days=5, hours=3),
             BookingStatus.NEEDS_REVISION,
-            PhysicalStatus.SUBMITTED,
+            PhysicalStatus.DA_NHAN_BAN_CUNG,
         )
 
         self.stdout.write(self.style.SUCCESS("Đã tạo/cập nhật dữ liệu demo thành công."))
@@ -132,7 +132,6 @@ class Command(BaseCommand):
             "booking.reject",
             "booking.request_revision",
             "booking.change_room",
-            "booking.confirm_physical_submission",
             "blackout.manage",
             "rule_config.manage",
             "document_template.manage",
@@ -228,9 +227,8 @@ class Command(BaseCommand):
         physical_status,
     ):
         now = timezone.now()
-        physical_submitted_at = now if physical_status != PhysicalStatus.NOT_SUBMITTED else None
         physical_confirmed_at = (
-            now if physical_status == PhysicalStatus.CONFIRMED_RECEIVED else None
+            now if physical_status == PhysicalStatus.DA_NHAN_BAN_CUNG else None
         )
         booking, _ = Booking.objects.get_or_create(
             activity_name=activity_name,
@@ -246,7 +244,6 @@ class Command(BaseCommand):
                 "end_time": end_time,
                 "status": status,
                 "physical_status": physical_status,
-                "physical_submitted_at": physical_submitted_at,
                 "physical_confirmed_at": physical_confirmed_at,
                 "hold_expires_at": (
                     now + timedelta(hours=48)

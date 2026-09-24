@@ -27,7 +27,7 @@ export type BookingStatus =
   | "cancelled"
   | "expired";
 export type PhysicalStatus =
-  "not_submitted" | "submitted" | "confirmed_received";
+  "chua_nhan" | "da_nhan_ban_cung";
 
 export type Campus = { id: CampusId; name: string; code: string; address?: string; active?: boolean; archivedAt?: string | null };
 export type Building = {
@@ -81,8 +81,6 @@ export type Booking = {
   equipment: Equipment[];
   status: BookingStatus;
   physicalStatus: PhysicalStatus;
-  scanName?: string;
-  scanFileUrl?: string;
   organizationProfile?: OrganizationProfile;
   hiddenDetails?: boolean;
   holdExpiresAt?: string;
@@ -140,9 +138,9 @@ export const defaultDocumentTemplateContent: DocumentTemplateContent = {
   rightHeader: "ĐOÀN TNCS HỒ CHÍ MINH",
   title: "ĐƠN ĐỀ NGHỊ",
   recipient: "Kính gửi: Phòng Hành chính Quản trị và Tổ chức Cán bộ",
-  intro: "Văn phòng Đoàn tổng hợp lịch mượn phòng theo danh sách bên dưới.",
-  commitment: "Các đơn vị cam kết sử dụng phòng đúng mục đích và hoàn trả nguyên trạng cơ sở vật chất sau khi sử dụng.",
-  closing: "Kính mong Quý Phòng xem xét và hỗ trợ. Xin trân trọng cảm ơn!",
+  intro: "Thực hiện nhiệm vụ kế hoạch năm học, các đơn vị trực thuộc ĐTN – HSV tiến hành tổ chức sinh hoạt. Để hoạt động diễn ra đúng kế hoạch và thành công tốt đẹp, kính đề nghị Quý phòng xem xét và hỗ trợ. Cụ thể theo danh sách:",
+  commitment: "Các đơn vị trực thuộc ĐTN – HSV cam kết sau khi sử dụng phòng học xong sẽ trả đúng nguyên trạng ban đầu của phòng học.",
+  closing: "Kính mong nhận được sự giúp đỡ của Quý Phòng.\nXin trân trọng cảm ơn!",
   leftSignature: "Ý KIẾN\nPHÒNG HCQT & TCCB",
   rightSignature: "TM. BCH ĐOÀN TRƯỜNG\nUV BAN THƯỜNG VỤ",
 };
@@ -172,7 +170,6 @@ type Store = {
   addBooking: (data: NewBooking) => Promise<Booking>;
   updateBooking: (id: string, patch: Partial<Booking>) => Promise<void>;
   cancelBooking: (id: string, reason?: string) => Promise<void>;
-  uploadScan: (id: string, file: File | string) => Promise<void>;
   addBlackout: (data: Omit<Blackout, "id">) => Promise<void>;
   addRoom: (data: Omit<Room, "id">) => Promise<void>;
   updateRoom: (id: string, patch: Partial<Room>) => Promise<void>;
@@ -251,7 +248,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     id: String(r.id), buildingId: String(r.building), name: r.name, floor: r.floor, capacity: r.capacity,
     equipment: (["projector","microphone","ac","whiteboard","sound"] as Equipment[]).filter((e) =>
       e === "projector" ? r.has_projector : e === "microphone" ? r.has_microphone : e === "ac" ? r.has_ac : e === "whiteboard" ? r.has_whiteboard : r.has_sound_system),
-    rentable: Boolean(r.rentable), bufferMinutes: Math.max(r.buffer_before_minutes ?? 0, r.buffer_after_minutes ?? 0), active: r.active, archivedAt: r.archived_at,
+    rentable: Boolean(r.rentable), bufferMinutes: Math.max(15, r.buffer_before_minutes ?? 0, r.buffer_after_minutes ?? 0), active: r.active, archivedAt: r.archived_at,
   });
   const mapBooking = (b: any): Booking => ({
     id: String(b.id), clubCode: b.organization?.toString() ?? "", clubName: b.organization_name ?? "CLB",
@@ -260,7 +257,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
     contactPhone: b.contact_phone, contactEmail: b.contact_email,     equipment: Object.entries(b.equipment_request ?? {})
       .filter(([, enabled]) => Boolean(enabled))
       .map(([name]) => name as Equipment),
-    status: b.status, physicalStatus: b.physical_status, scanName: b.scan_file_url?.split("/").pop(), scanFileUrl: b.scan_file_url,
+    status: b.status, physicalStatus: b.physical_status,
     organizationProfile: b.organization_profile, hiddenDetails: Boolean(b.hidden_details),
     holdExpiresAt: b.hold_expires_at, note: b.notes, createdAt: b.created_at,
   });
@@ -519,8 +516,7 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
             end_time: data.endAt,
             equipment_request: Object.fromEntries(data.equipment.map((x) => [x, true])),
           });
-          const { data: submitted } = await api.post(`${endpoints.bookings}${remote.id}/submit/`);
-          const booking = mapBooking(submitted);
+          const booking = mapBooking(remote);
           setBookings((items) => [booking, ...items]);
           return booking;
         } catch (error) {
@@ -531,11 +527,6 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
       updateBooking: async (id, patch) => {
         const action = patch.status === "approved" ? "approve" : patch.status === "rejected" ? "reject" : patch.status === "needs_revision" ? "request-revision" : patch.status === "pending_hold" ? "submit" : undefined;
         try {
-          if (patch.physicalStatus === "confirmed_received") {
-            const { data } = await api.post(`${endpoints.bookings}${id}/confirm-physical/`);
-            setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
-            return;
-          }
           if (action) {
             const { data } = await api.post(`${endpoints.bookings}${id}/${action}/`, { reason: patch.note });
             setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
@@ -572,18 +563,6 @@ export function PrototypeStoreProvider({ children }: { children: ReactNode }) {
           setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
         } catch (error) {
           showApiError(error, "Không thể hủy đơn");
-          throw error;
-        }
-      },
-      uploadScan: async (id, file) => {
-        if (!(file instanceof File)) return;
-        const form = new FormData();
-        form.append("file", file);
-        try {
-          const { data } = await api.post(`${endpoints.bookings}${id}/upload-scan/`, form, { headers: { "Content-Type": "multipart/form-data" } });
-          setBookings((items) => items.map((item) => item.id === id ? mapBooking(data) : item));
-        } catch (error) {
-          showApiError(error, "Không thể upload bản scan");
           throw error;
         }
       },

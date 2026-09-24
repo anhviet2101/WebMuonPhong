@@ -16,9 +16,8 @@ export type BookingStatusKey =
   | "expired";
 
 export type PhysicalStatusKey =
-  | "not_submitted"
-  | "submitted"
-  | "confirmed_received";
+  | "chua_nhan"
+  | "da_nhan_ban_cung";
 
 const bookingStatusLabel: Record<BookingStatusKey, string> = {
   draft: "Draft",
@@ -45,15 +44,13 @@ const bookingStatusClass: Record<BookingStatusKey, string> = {
 };
 
 const physicalStatusLabel: Record<PhysicalStatusKey, string> = {
-  not_submitted: "Chưa nộp",
-  submitted: "Đã upload scan",
-  confirmed_received: "Đã nhận bản cứng",
+  chua_nhan: "Chưa nhận bản cứng",
+  da_nhan_ban_cung: "Đã nhận bản cứng",
 };
 
 const physicalStatusClass: Record<PhysicalStatusKey, string> = {
-  not_submitted: "border-amber-200 bg-amber-50 text-amber-800",
-  submitted: "border-blue-200 bg-blue-50 text-blue-800",
-  confirmed_received: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  chua_nhan: "border-amber-200 bg-amber-50 text-amber-800",
+  da_nhan_ban_cung: "border-emerald-200 bg-emerald-50 text-emerald-800",
 };
 
 export function BookingStatusBadge({

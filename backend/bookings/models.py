@@ -22,9 +22,8 @@ class BookingStatus(models.TextChoices):
 
 
 class PhysicalStatus(models.TextChoices):
-    NOT_SUBMITTED = "not_submitted", "Not submitted"
-    SUBMITTED = "submitted", "Submitted"
-    CONFIRMED_RECEIVED = "confirmed_received", "Confirmed received"
+    CHUA_NHAN = "chua_nhan", "Chưa nhận"
+    DA_NHAN_BAN_CUNG = "da_nhan_ban_cung", "Đã nhận bản cứng"
 
 
 class ApprovalDecision(models.TextChoices):
@@ -235,11 +234,9 @@ class Booking(models.Model):
     physical_status = models.CharField(
         max_length=32,
         choices=PhysicalStatus.choices,
-        default=PhysicalStatus.NOT_SUBMITTED,
+        default=PhysicalStatus.CHUA_NHAN,
         db_index=True,
     )
-    scan_file_url = models.URLField(max_length=2048, blank=True)
-    physical_submitted_at = models.DateTimeField(null=True, blank=True)
     physical_confirmed_at = models.DateTimeField(null=True, blank=True)
     physical_confirmed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -306,9 +303,9 @@ class Booking(models.Model):
 
     def get_buffered_time_range(self):
         buffered_start = self.start_time - timedelta(
-            minutes=self.room.buffer_before_minutes
+            minutes=max(15, self.room.buffer_before_minutes)
         )
-        buffered_end = self.end_time + timedelta(minutes=self.room.buffer_after_minutes)
+        buffered_end = self.end_time + timedelta(minutes=max(15, self.room.buffer_after_minutes))
         return (buffered_start, buffered_end)
 
 

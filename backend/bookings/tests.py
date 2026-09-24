@@ -1,9 +1,6 @@
 from datetime import timedelta
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
-from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
@@ -24,9 +21,7 @@ from backend.bookings.models import (
 from backend.bookings.services.booking_service import (
     approve_booking,
     change_room,
-    confirm_physical,
     submit_booking,
-    upload_scan,
 )
 from backend.bookings.tasks import (
     auto_complete_past_bookings,
@@ -130,6 +125,25 @@ class BookingApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(Booking.objects.get(pk=response.data["id"]).organization, self.organization)
+        self.assertEqual(response.data["status"], BookingStatus.PENDING_HOLD)
+
+    def test_create_conflict_does_not_leave_draft(self):
+        held = self._booking()
+        submit_booking(held, self.user)
+        self.client.force_authenticate(self.user)
+        response = self.client.post(reverse("booking-list"), {
+            "room": self.room.id,
+            "activity_name": "Conflicting meeting",
+            "description": "Meeting",
+            "participant_count": 10,
+            "contact_person": "Representative",
+            "contact_phone": "0900000000",
+            "contact_email": "club@example.com",
+            "start_time": held.start_time.isoformat(),
+            "end_time": held.end_time.isoformat(),
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Booking.objects.filter(activity_name="Conflicting meeting").exists())
 
     def test_admin_account_requires_and_keeps_selected_club(self):
         admin_role = Role.objects.get(name="YU_ADMIN")
@@ -159,17 +173,13 @@ class BookingApiTests(APITestCase):
             self.other_organization,
         )
 
-    def test_approve_requires_confirmed_physical_copy(self):
+    def test_approve_records_hard_copy(self):
         booking = self._booking()
         submit_booking(booking, self.user)
-        admin = User.objects.create_user(
-            "admin",
-            password="password",
-            is_staff=True,
-        )
-
-        with self.assertRaisesMessage(ValidationError, "Chưa nhận bản cứng từ CLB"):
-            approve_booking(booking, admin)
+        admin = User.objects.create_user("admin", password="password", is_staff=True)
+        approved = approve_booking(booking, admin)
+        self.assertEqual(approved.status, BookingStatus.APPROVED)
+        self.assertEqual(approved.physical_status, PhysicalStatus.DA_NHAN_BAN_CUNG)
 
     def test_available_rooms_excludes_conflicting_booking(self):
         booking = self._booking()
@@ -187,6 +197,37 @@ class BookingApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(self.room.id, [item["id"] for item in response.data])
 
+    def test_minimum_fifteen_minute_buffer_blocks_room(self):
+        self.room.buffer_before_minutes = 0
+        self.room.buffer_after_minutes = 0
+        self.room.save(update_fields=["buffer_before_minutes", "buffer_after_minutes"])
+        booking = self._booking()
+        submit_booking(booking, self.user)
+        candidate_start = booking.end_time + timedelta(minutes=20)
+        candidate_end = candidate_start + timedelta(hours=1)
+        self.client.force_authenticate(self.user)
+        response = self.client.get(reverse("room-available"), {
+            "start_time": candidate_start.isoformat(),
+            "end_time": candidate_end.isoformat(),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.room.id, [item["id"] for item in response.data])
+        candidate = Booking.objects.create(
+            organization=self.organization,
+            room=self.room,
+            activity_name="Too close to prior booking",
+            description="Test buffer",
+            participant_count=10,
+            contact_person="Representative",
+            contact_phone="0900000000",
+            contact_email="club@example.com",
+            start_time=candidate_start,
+            end_time=candidate_end,
+            created_by=self.user,
+        )
+        with self.assertRaisesMessage(ValidationError, "Phòng đã có lịch trùng"):
+            submit_booking(candidate, self.user)
+
     def test_available_rooms_allows_excluding_current_booking(self):
         booking = self._booking()
         submit_booking(booking, self.user)
@@ -203,6 +244,19 @@ class BookingApiTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(self.room.id, [item["id"] for item in response.data])
+
+    def test_available_rooms_excludes_approved_booking(self):
+        booking = self._booking()
+        submit_booking(booking, self.user)
+        admin = User.objects.create_user("approver", password="password", is_staff=True)
+        approve_booking(booking, admin)
+        self.client.force_authenticate(self.other_user)
+        response = self.client.get(reverse("room-available"), {
+            "start_time": booking.start_time.isoformat(),
+            "end_time": booking.end_time.isoformat(),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self.room.id, [item["id"] for item in response.data])
 
     def test_available_rooms_respects_blackout_and_buffer(self):
         start = timezone.now() + timedelta(days=2)
@@ -325,37 +379,10 @@ class BookingApiTests(APITestCase):
         self.assertEqual(changed.room_id, other_room.id)
         self.assertEqual(changed.hold_expires_at, booking.hold_expires_at)
 
-    def test_scan_file_requires_booking_access(self):
-        booking = self._booking()
-        with override_settings(STORAGES={
-            "default": {"BACKEND": "django.core.files.storage.InMemoryStorage"},
-            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
-        }):
-            upload_scan(
-                booking,
-                ContentFile(b"%PDF-1.4\n%%EOF", name="application.pdf"),
-                self.user,
-            )
-            booking.refresh_from_db()
-            self.assertTrue(booking.scan_file_url.startswith("/media/"))
-            self.assertTrue(
-                default_storage.exists(booking.scan_file_url.removeprefix("/media/"))
-            )
-
-            self.client.force_authenticate(self.user)
-            allowed = self.client.get(reverse("booking-scan", args=[booking.id]))
-            self.assertEqual(allowed.status_code, 200)
-            self.assertEqual(b"".join(allowed.streaming_content), b"%PDF-1.4\n%%EOF")
-
-            self.client.force_authenticate(self.other_user)
-            denied = self.client.get(reverse("booking-scan", args=[booking.id]))
-            self.assertEqual(denied.status_code, 404)
-
     def test_approval_rejects_new_blackout(self):
         booking = self._booking()
         submit_booking(booking, self.user)
         admin = User.objects.create_user("office", password="password", is_staff=True)
-        confirm_physical(booking, admin)
         RoomBlackout.objects.create(
             scope_type="room",
             room_ids=[self.room.id],
@@ -381,7 +408,7 @@ class BookingApiTests(APITestCase):
     def test_club_cannot_edit_after_physical_copy_confirmed(self):
         booking = self._booking()
         booking.status = BookingStatus.NEEDS_REVISION
-        booking.physical_status = PhysicalStatus.CONFIRMED_RECEIVED
+        booking.physical_status = PhysicalStatus.DA_NHAN_BAN_CUNG
         booking.save(update_fields=["status", "physical_status", "updated_at"])
 
         self.client.force_authenticate(self.user)

@@ -275,8 +275,6 @@ class BookingSerializer(serializers.ModelSerializer):
             "notes",
             "status",
             "physical_status",
-            "scan_file_url",
-            "physical_submitted_at",
             "physical_confirmed_at",
             "physical_confirmed_by",
             "hold_expires_at",
@@ -295,8 +293,6 @@ class BookingSerializer(serializers.ModelSerializer):
             "campus_name",
             "status",
             "physical_status",
-            "scan_file_url",
-            "physical_submitted_at",
             "physical_confirmed_at",
             "physical_confirmed_by",
             "hold_expires_at",
@@ -354,22 +350,6 @@ class BookingActionSerializer(serializers.Serializer):
 
 class ChangeRoomSerializer(BookingActionSerializer):
     new_room = serializers.PrimaryKeyRelatedField(queryset=Room.objects.all())
-
-
-class UploadScanSerializer(serializers.Serializer):
-    file = serializers.FileField()
-
-    def validate_file(self, file):
-        extension = "." + file.name.rsplit(".", 1)[-1].lower()
-        if extension not in {".jpg", ".jpeg", ".png", ".pdf"}:
-            raise serializers.ValidationError(
-                "File bản scan phải có định dạng .jpg, .jpeg, .png hoặc .pdf."
-            )
-
-        if file.size > 10 * 1024 * 1024:
-            raise serializers.ValidationError("File bản scan không được vượt quá 10MB.")
-
-        return file
 
 
 class BookingApprovalSerializer(serializers.ModelSerializer):

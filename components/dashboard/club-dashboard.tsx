@@ -10,12 +10,10 @@ import {
   Phone,
   Plus,
   Printer,
-  UploadCloud,
   UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
@@ -62,9 +60,11 @@ import {
   type Equipment,
 } from "@/components/shared/prototype-store";
 import {
-  exportScheduleDocx,
-  printSchedule,
-  type ScheduleRow,
+  exportMauADocx,
+  mauAFieldsFromBookings,
+  mauAFixed,
+  printMauA,
+  type MauAFields,
 } from "@/components/shared/document-export";
 import { useAuth } from "@/components/auth/auth-context";
 import { api, endpoints } from "@/lib/api";
@@ -102,18 +102,21 @@ function HoldCountdown({ expiresAt }: { expiresAt?: string }) {
   const seconds = Math.floor((remaining % 60000) / 1000);
   return <span className="text-xs text-amber-700">Còn {hours}g {minutes}p {seconds}s giữ chỗ</span>;
 }
-function BookingWizard({
+function BookingFormDialog({
   open,
   close,
   editing,
+  onCreated,
 }: {
   open: boolean;
   close: () => void;
   editing: Booking | null;
+  onCreated: (booking: Booking) => void;
 }) {
   const store = usePrototypeStore();
   const { user } = useAuth();
-  const [step, setStep] = useState(1);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
   const [start, setStart] = useState(
     editing ? toLocalInput(editing.startAt) : defaultBookingTime(18),
   );
@@ -227,7 +230,7 @@ function BookingWizard({
     return () => {
       cancelled = true;
     };
-  }, [backup, building, editing?.id, end, room, start, validTime]);
+  }, [building, editing?.id, end, start, validTime]);
   const resetBuilding = (value: string) => {
     setCampus(value);
     const first = store.buildings.find((b) => b.campusId === value);
@@ -236,12 +239,23 @@ function BookingWizard({
     setBackup("none");
   };
   const submit = async () => {
-    if (timeError) {
-      setStep(1);
-      return toast.error(timeError);
-    }
-    if (!name.trim() || !room)
-      return toast.error("Vui lòng điền tên hoạt động và chọn phòng");
+    const nextErrors: Record<string, string> = {};
+    if (timeError) nextErrors.time = timeError;
+    if (!campus) nextErrors.campus = "Vui lòng chọn cơ sở.";
+    if (!building) nextErrors.building = "Vui lòng chọn tòa nhà.";
+    if (!room) nextErrors.room = "Vui lòng chọn phòng trống.";
+    if (!name.trim()) nextErrors.name = "Vui lòng nhập tên hoạt động.";
+    if (!description.trim()) nextErrors.description = "Vui lòng nhập mục đích hoặc mô tả.";
+    if (!Number.isInteger(Number(count)) || Number(count) < 1) nextErrors.count = "Số người phải là số nguyên lớn hơn 0.";
+    const chosenRoom = store.rooms.find((item) => item.id === room);
+    if (chosenRoom?.capacity != null && Number(count) > chosenRoom.capacity) nextErrors.count = `Phòng chỉ chứa tối đa ${chosenRoom.capacity} người.`;
+    if (!contactPerson.trim()) nextErrors.contactPerson = "Vui lòng nhập người đại diện.";
+    if (!contactPhone.trim()) nextErrors.contactPhone = "Vui lòng nhập số điện thoại.";
+    if (!contactEmail.trim()) nextErrors.contactEmail = "Vui lòng nhập email.";
+    else if (!/^\S+@\S+\.\S+$/.test(contactEmail)) nextErrors.contactEmail = "Email chưa hợp lệ.";
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length) return;
+    setSubmitting(true);
     try {
       const freshIds = await loadAvailableRoomIds();
       setRemoteAvailableIds(freshIds);
@@ -253,25 +267,19 @@ function BookingWizard({
         setBackup(
           backup !== "none" && freshIds.includes(backup) ? backup : "none",
         );
-        setStep(2);
+        setErrors({ room: "Phòng đã có đơn giữ hoặc bị khóa trong khung giờ này." });
+        setSubmitting(false);
         return toast.error(
           "Phòng đã có đơn khác giữ trong khung giờ này. Vui lòng chọn phòng khác.",
         );
       }
     } catch {
-      setStep(2);
+      setErrors({ room: "Không thể kiểm tra phòng trống. Vui lòng thử lại." });
+      setSubmitting(false);
       return toast.error(
         "Không thể kiểm tra phòng khả dụng. Vui lòng thử lại trước khi gửi đơn.",
       );
     }
-    if (
-      !contactPerson.trim() ||
-      !contactPhone.trim() ||
-      !contactEmail.trim()
-    )
-      return toast.error("Vui lòng điền đầy đủ thông tin người đại diện");
-    if (!/^\S+@\S+\.\S+$/.test(contactEmail))
-      return toast.error("Email người đại diện chưa hợp lệ");
     const data = {
       clubCode: user?.organization?.abbreviation ?? "",
       clubName: user?.organization?.name ?? user?.organizationName ?? "",
@@ -297,10 +305,13 @@ function BookingWizard({
       } else {
         const b = await store.addBooking(data);
         toast.success(`${b.id} đã được giữ chỗ trong 48 giờ`);
+        onCreated(b);
       }
       close();
     } catch {
       // The store reports the API error and keeps the form open for correction.
+    } finally {
+      setSubmitting(false);
     }
   };
   return (
@@ -311,28 +322,25 @@ function BookingWizard({
             {editing ? "Sửa đơn" : "Đăng ký mượn phòng"}
           </DialogTitle>
           <DialogDescription>
-            Bước {step}/3 · Buffer 15 phút được tính khi lọc phòng.
+            Điền thông tin trên một màn hình. Hệ thống tính buffer 15 phút trước và sau.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex gap-2">
-          {["Thời gian", "Phòng", "Hoạt động"].map((x, i) => (
-            <Badge key={x} variant={step === i + 1 ? "default" : "outline"}>
-              {i + 1}. {x}
-            </Badge>
-          ))}
-        </div>
-        {step === 1 && (
+        <h3 className="font-semibold">Thời gian</h3>
+        {(
           <div className="grid gap-4 sm:grid-cols-2">
-            <DateTime24Field label="Bắt đầu" value={start} onChange={changeStart} />
-            <DateTime24Field label="Kết thúc" value={end} onChange={setEnd} />
-            {timeError && (
+            <div><DateTime24Field label="Bắt đầu" value={start} onChange={changeStart} />
+              {!start && <p className="text-sm text-red-600">Vui lòng chọn ngày và giờ bắt đầu.</p>}</div>
+            <div><DateTime24Field label="Kết thúc" value={end} onChange={setEnd} />
+              {!end && <p className="text-sm text-red-600">Vui lòng chọn ngày và giờ kết thúc.</p>}</div>
+            {start && end && (errors.time || timeError) && (
               <p className="text-sm text-red-600 sm:col-span-2">
-                {timeError}
+                {errors.time || timeError}
               </p>
             )}
           </div>
         )}
-        {step === 2 && (
+        <h3 className="font-semibold">Địa điểm</h3>
+        {(
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="grid gap-2">
               <Label>Cơ sở</Label>
@@ -348,6 +356,7 @@ function BookingWizard({
                   ))}
                 </SelectContent>
               </Select>
+              {errors.campus && <p className="text-sm text-red-600">{errors.campus}</p>}
             </div>
             <div className="grid gap-2">
               <Label>Tòa nhà</Label>
@@ -356,6 +365,7 @@ function BookingWizard({
                 onValueChange={(v) => {
                   setBuilding(v);
                   setRoom("");
+                  setBackup("none");
                 }}
               >
                 <SelectTrigger className="w-full">
@@ -369,6 +379,7 @@ function BookingWizard({
                   ))}
                 </SelectContent>
               </Select>
+              {errors.building && <p className="text-sm text-red-600">{errors.building}</p>}
             </div>
             <div className="grid gap-2">
               <Label>Phòng chính</Label>
@@ -394,6 +405,7 @@ function BookingWizard({
                   ))}
                 </SelectContent>
               </Select>
+              {errors.room && <p className="text-sm text-red-600">{errors.room}</p>}
             </div>
             <div className="grid gap-2">
               <Label>Phòng dự phòng</Label>
@@ -426,11 +438,13 @@ function BookingWizard({
             )}
           </div>
         )}
-        {step === 3 && (
+        <h3 className="font-semibold">Hoạt động và người liên hệ</h3>
+        {(
           <div className="grid gap-4">
             <div className="grid gap-2">
               <Label>Tên hoạt động</Label>
               <Input value={name} onChange={(e) => setName(e.target.value)} />
+              {errors.name && <p className="text-sm text-red-600">{errors.name}</p>}
             </div>
             <div className="grid gap-2">
               <Label>Mô tả</Label>
@@ -438,6 +452,7 @@ function BookingWizard({
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
+              {errors.description && <p className="text-sm text-red-600">{errors.description}</p>}
             </div>
             <div className="grid gap-2">
               <Label>Số người</Label>
@@ -446,6 +461,7 @@ function BookingWizard({
                 value={count}
                 onChange={(e) => setCount(e.target.value)}
               />
+              {errors.count && <p className="text-sm text-red-600">{errors.count}</p>}
             </div>
             <div className="grid gap-4 rounded-lg border bg-slate-50 p-4 sm:grid-cols-2">
               <div className="grid gap-2">
@@ -454,6 +470,7 @@ function BookingWizard({
                   value={contactPerson}
                   onChange={(e) => setContactPerson(e.target.value)}
                 />
+                {errors.contactPerson && <p className="text-sm text-red-600">{errors.contactPerson}</p>}
               </div>
               <div className="grid gap-2">
                 <Label>Số điện thoại / Zalo *</Label>
@@ -462,6 +479,7 @@ function BookingWizard({
                   value={contactPhone}
                   onChange={(e) => setContactPhone(e.target.value)}
                 />
+                {errors.contactPhone && <p className="text-sm text-red-600">{errors.contactPhone}</p>}
               </div>
               <div className="grid gap-2">
                 <Label>Email *</Label>
@@ -470,6 +488,7 @@ function BookingWizard({
                   value={contactEmail}
                   onChange={(e) => setContactEmail(e.target.value)}
                 />
+                {errors.contactEmail && <p className="text-sm text-red-600">{errors.contactEmail}</p>}
               </div>
             </div>
             <div className="grid gap-2">
@@ -502,70 +521,12 @@ function BookingWizard({
           <Button variant="outline" onClick={close}>
             Đóng
           </Button>
-          {step > 1 && (
-            <Button variant="outline" onClick={() => setStep((s) => s - 1)}>
-              Quay lại
-            </Button>
-          )}
-          {step < 3 ? (
-            <Button
-              disabled={step === 1 ? !validTime : !room}
-              onClick={() => setStep((s) => s + 1)}
-            >
-              Tiếp tục
-            </Button>
-          ) : (
-            <Button onClick={submit}>Gửi đơn</Button>
-          )}
+          <Button onClick={submit} disabled={submitting}>{submitting ? "Đang gửi..." : "Gửi đơn"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
-function Upload({
-  booking,
-  close,
-}: {
-  booking: Booking | null;
-  close: () => void;
-}) {
-  const { uploadScan } = usePrototypeStore();
-  const [file, setFile] = useState<File | null>(null);
-  const submit = async () => {
-    if (!booking || !file) return toast.error("Chọn file JPG, PNG hoặc PDF");
-    if (file.size > 10 * 1024 * 1024) return toast.error("File vượt quá 10MB");
-    await uploadScan(booking.id, file);
-    toast.success("Đã upload scan và cập nhật trạng thái");
-    close();
-  };
-  return (
-    <Dialog open={!!booking} onOpenChange={(v) => !v && close()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Upload scan</DialogTitle>
-          <DialogDescription>JPG, PNG hoặc PDF; tối đa 10MB.</DialogDescription>
-        </DialogHeader>
-        <label className="grid cursor-pointer place-items-center gap-2 rounded-lg border-2 border-dashed p-10">
-          <UploadCloud />
-          <span>{file?.name ?? "Chọn file từ máy"}</span>
-          <Input
-            className="sr-only"
-            type="file"
-            accept=".jpg,.jpeg,.png,.pdf"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
-        </label>
-        <DialogFooter>
-          <Button variant="outline" onClick={close}>
-            Hủy
-          </Button>
-          <Button onClick={submit}>Xác nhận upload</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 function BookingDetailDialog({
   booking,
   close,
@@ -656,150 +617,93 @@ function BookingDetailDialog({
   );
 }
 
-function weekBounds(value: string) {
-  const selected = new Date(`${value}T00:00:00`);
-  const mondayOffset = (selected.getDay() + 6) % 7;
-  const from = new Date(selected);
-  from.setDate(selected.getDate() - mondayOffset);
-  const to = new Date(from);
-  to.setDate(from.getDate() + 6);
-  to.setHours(23, 59, 59, 999);
-  return { from, to };
-}
-
-const localDateValue = (date: Date) =>
+const localDate = (date: Date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 
-function MauAPreview({ open, close }: { open: boolean; close: () => void }) {
+function MauAPreview({ initialBooking, close }: { initialBooking: Booking | null; close: () => void }) {
   const store = usePrototypeStore();
-  const template = store.documentTemplates.find((item) => item.templateType === "mau_a")?.content;
-  const [weekDate, setWeekDate] = useState(
-    localDateValue(new Date()),
-  );
-  const { from, to } = weekBounds(weekDate);
-  const rows = useMemo<ScheduleRow[]>(
-    () =>
-      store.bookings
-        .filter(
-          (booking) =>
-            ["approved", "room_changed"].includes(booking.status) &&
-            new Date(booking.startAt) >= from &&
-            new Date(booking.startAt) <= to,
-        )
-        .sort(
-          (a, b) =>
-            new Date(a.startAt).getTime() - new Date(b.startAt).getTime(),
-        )
-        .map((booking) => {
-          const room = store.rooms.find((item) => item.id === booking.roomId);
-          const building = store.buildings.find(
-            (item) => item.id === room?.buildingId,
-          );
-          return {
-            booking,
-            room,
-            building,
-            campus: store.campuses.find(
-              (item) => item.id === building?.campusId,
-            ),
-          };
-        }),
-    [store.bookings, store.rooms, store.buildings, store.campuses, from, to],
-  );
-  const formatDate = (date: Date) =>
-    date.toLocaleDateString("vi-VN", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-    });
+  const eligible = useMemo(() => store.bookings.filter((booking) =>
+    ["pending_hold", "needs_revision", "approved", "room_changed"].includes(booking.status)), [store.bookings]);
+  const [scope, setScope] = useState<"day" | "week">("day");
+  const [date, setDate] = useState(localDate(new Date(initialBooking?.startAt ?? eligible[0]?.startAt ?? Date.now())));
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [fields, setFields] = useState<MauAFields>(() => mauAFieldsFromBookings([]));
+  const range = useMemo(() => {
+    const from = new Date(`${date}T00:00:00`);
+    if (scope === "week") from.setDate(from.getDate() - ((from.getDay() + 6) % 7));
+    const to = new Date(from);
+    to.setDate(to.getDate() + (scope === "week" ? 7 : 1));
+    return { from, to };
+  }, [scope, date]);
+  const available = useMemo(() => eligible
+    .filter((booking) => new Date(booking.startAt) >= range.from && new Date(booking.startAt) < range.to)
+    .sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime()),
+  [eligible, range]);
+  useEffect(() => {
+    setSelectedIds(available.map((booking) => booking.id));
+    setFields(mauAFieldsFromBookings(available));
+  }, [available]);
+  const selected = available.filter((booking) => selectedIds.includes(booking.id));
+  const choose = (id: string, checked: boolean) => {
+    const nextIds = checked ? [...selectedIds, id] : selectedIds.filter((item) => item !== id);
+    setSelectedIds(nextIds);
+    setFields(mauAFieldsFromBookings(available.filter((booking) => nextIds.includes(booking.id))));
+  };
+  const field = (key: "clubName" | "issueDate" | "intro" | "participants" | "signerTitle" | "signerName", value: string) =>
+    setFields((current) => ({ ...current, [key]: value }));
+  const slotField = (bookingId: string, key: "time" | "location", value: string) =>
+    setFields((current) => ({ ...current, slots: current.slots.map((slot) => slot.bookingId === bookingId ? { ...slot, [key]: value } : slot) }));
   return (
-    <Dialog open={open} onOpenChange={(value) => !value && close()}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-5xl">
+    <Dialog open onOpenChange={(value) => !value && close()}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
         <DialogHeader>
-          <DialogTitle>Xem trước Đơn đề nghị - Mẫu A</DialogTitle>
-          <DialogDescription>
-            Chỉ tổng hợp lịch đã duyệt của CLB từ Thứ Hai đến Chủ Nhật.
-          </DialogDescription>
+          <DialogTitle>Mẫu A · Đơn đề nghị của CLB</DialogTitle>
+          <DialogDescription>Chọn lịch trong một ngày hoặc cả tuần. Chữ đỏ được chỉnh riêng cho lần xuất này; chữ đen giữ theo mẫu bạn cung cấp.</DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-3 rounded-lg border bg-slate-50 p-4 sm:flex-row sm:items-end sm:justify-between">
-          <div className="grid gap-2">
-            <Label>Chọn một ngày trong tuần</Label>
-            <Input
-              type="date"
-              value={weekDate}
-              onChange={(event) => setWeekDate(event.target.value)}
-            />
+        <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-2">
+          <div className="grid gap-2"><Label>Phạm vi xuất</Label>
+            <Select value={scope} onValueChange={(value) => setScope(value as "day" | "week")}>
+              <SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="day">Một ngày</SelectItem><SelectItem value="week">Cả tuần (Thứ Hai – Chủ Nhật)</SelectItem></SelectContent>
+            </Select>
           </div>
-          <p className="text-sm text-slate-600">
-            Tuần {formatDate(from)} - {formatDate(to)} · {rows.length} lịch
-          </p>
+          <div className="grid gap-2"><Label>Chọn ngày</Label><Input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></div>
+          <p className="text-sm text-slate-600 sm:col-span-2">Khoảng xuất: {range.from.toLocaleDateString("vi-VN")} – {new Date(range.to.getTime() - 1).toLocaleDateString("vi-VN")}</p>
+          <div className="grid gap-2 sm:col-span-2">
+            {available.length ? available.map((booking) => (
+              <label key={booking.id} className="flex items-center gap-2 rounded-md border bg-white p-2 text-sm">
+                <input type="checkbox" checked={selectedIds.includes(booking.id)} onChange={(event) => choose(booking.id, event.target.checked)} />
+                {fmt(booking.startAt)} · {booking.roomName} · {booking.activityName}
+              </label>
+            )) : <p className="text-sm text-amber-700">Không có đơn giữ phòng hoặc đã duyệt trong khoảng này.</p>}
+          </div>
         </div>
-        <div className="overflow-x-auto rounded-lg border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>STT</TableHead>
-                <TableHead>Thời gian</TableHead>
-                <TableHead>Địa điểm</TableHead>
-                <TableHead>Đơn vị</TableHead>
-                <TableHead>Ghi chú</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.length === 0 ? (
-                <TableRow>
-                  <TableCell
-                    colSpan={5}
-                    className="py-10 text-center text-slate-500"
-                  >
-                    Tuần này chưa có lịch đã được duyệt.
-                  </TableCell>
-                </TableRow>
-              ) : (
-                rows.map((row, index) => (
-                  <TableRow key={row.booking.id}>
-                    <TableCell>{index + 1}</TableCell>
-                    <TableCell>
-                      {fmt(row.booking.startAt)} -{" "}
-                      {new Date(row.booking.endAt).toLocaleTimeString("vi-VN", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        hourCycle: "h23",
-                      })}
-                    </TableCell>
-                    <TableCell>
-                      {row.room?.name ?? row.booking.roomName} - {row.building?.name ?? row.booking.buildingName}
-                    </TableCell>
-                    <TableCell>{row.booking.clubName}</TableCell>
-                    <TableCell>{row.booking.note || ""}</TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+        <div className="space-y-3 rounded-lg border bg-white p-6 font-serif text-black">
+          <div className="grid gap-4 text-center sm:grid-cols-2">
+            <div><b>{mauAFixed.institution}</b><Input className="mt-2 font-serif text-red-700" aria-label="Tên CLB" value={fields.clubName} onChange={(event) => field("clubName", event.target.value)} /></div>
+            <div><Label>Ngày lập đơn</Label><Input className="mt-2 font-serif text-red-700" value={fields.issueDate} onChange={(event) => field("issueDate", event.target.value)} /></div>
+          </div>
+          <h2 className="text-center text-xl font-bold">{mauAFixed.title}</h2>
+          <p className="text-center font-bold">{mauAFixed.recipient}</p>
+          <textarea className="min-h-24 w-full rounded-md border border-input p-3 font-serif text-red-700" aria-label="Đoạn giới thiệu" value={fields.intro} onChange={(event) => field("intro", event.target.value)} />
+          <p>{mauAFixed.request}</p><p className="font-bold">Thời gian, địa điểm:</p>
+          {fields.slots.map((slot, index) => (
+            <div key={slot.bookingId} className="grid gap-2 rounded-md border p-3">
+              <label className="grid gap-1 sm:grid-cols-[120px_1fr] sm:items-center"><span>Thời gian {fields.slots.length > 1 ? index + 1 : ""}</span><Input className="font-serif text-red-700" value={slot.time} onChange={(event) => slotField(slot.bookingId, "time", event.target.value)} /></label>
+              <label className="grid gap-1 sm:grid-cols-[120px_1fr] sm:items-center"><span>Địa điểm {fields.slots.length > 1 ? index + 1 : ""}</span><Input className="font-serif text-red-700" value={slot.location} onChange={(event) => slotField(slot.bookingId, "location", event.target.value)} /></label>
+            </div>
+          ))}
+          <p>Cơ sở vật chất: {fields.equipment}</p>
+          <label className="grid gap-1 sm:grid-cols-[210px_1fr] sm:items-center"><span>Số lượng người tham gia:</span><Input className="font-serif text-red-700" value={fields.participants} onChange={(event) => field("participants", event.target.value)} /></label>
+          <p>{mauAFixed.commitment}</p><p className="whitespace-pre-line">{mauAFixed.closing}</p>
+          <div className="grid gap-3 pt-4 text-center text-sm font-bold sm:grid-cols-3">
+            <span>Ý KIẾN<br />PHÒNG HCQT VÀ TCCB</span><span>Ý KIẾN<br />HỘI SINH VIÊN TRƯỜNG</span>
+            <div>TM. BAN CHỦ NHIỆM<Input className="mt-2 font-serif text-red-700" aria-label="Chức danh người ký" value={fields.signerTitle} onChange={(event) => field("signerTitle", event.target.value)} /><Input className="mt-4 font-serif text-red-700" aria-label="Tên người ký" value={fields.signerName} onChange={(event) => field("signerName", event.target.value)} /></div>
+          </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={close}>
-            Đóng
-          </Button>
-          <Button
-            variant="outline"
-            disabled={!rows.length}
-            onClick={() => printSchedule(rows, template, { redDynamicText: true })}
-          >
-            <Printer />
-            In đơn
-          </Button>
-          <Button
-            disabled={!rows.length}
-            onClick={async () => {
-              await exportScheduleDocx(rows, `Mau-A-${weekDate}.docx`, template, { redDynamicText: true });
-              toast.success("Đã tạo Mẫu A theo đúng lịch tuần được chọn");
-            }}
-          >
-            <Download />
-            Tải DOCX
-          </Button>
+          <Button variant="outline" onClick={close}>Đóng</Button>
+          <Button variant="outline" disabled={!selected.length} onClick={() => printMauA(fields)}><Printer /> In đơn</Button>
+          <Button disabled={!selected.length} onClick={async () => { await exportMauADocx(fields, `Mau-A-${scope}-${date}.docx`); toast.success("Đã tải Mẫu A"); }}><Download /> Tải file .docx</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -824,11 +728,11 @@ export function ClubDashboard() {
   const history = mine.filter((b) =>
     ["completed", "rejected", "cancelled", "expired"].includes(b.status),
   );
-  const [wizard, setWizard] = useState(false),
+  const [formOpen, setFormOpen] = useState(false),
     [editing, setEditing] = useState<Booking | null>(null),
-    [upload, setUpload] = useState<Booking | null>(null),
     [cancel, setCancel] = useState<Booking | null>(null),
     [detail, setDetail] = useState<Booking | null>(null),
+    [mauABooking, setMauABooking] = useState<Booking | null>(null),
     [mauAOpen, setMauAOpen] = useState(false);
   const roomName = (id: string) =>
     store.rooms.find((r) => r.id === id)?.name ?? store.bookings.find((b) => b.roomId === id)?.roomName ?? id;
@@ -843,7 +747,7 @@ export function ClubDashboard() {
         userInitials={(user?.fullName || user?.username || "CLB").split(/\s+/).slice(-2).map((part) => part[0]).join("").toUpperCase()}
         notificationAudience="club"
         primaryAction={
-          <Button onClick={() => setWizard(true)}>
+          <Button onClick={() => setFormOpen(true)}>
             <Plus />
             Đăng ký mượn phòng
           </Button>
@@ -864,7 +768,7 @@ export function ClubDashboard() {
             ["Lịch sắp tới", upcoming.length, <CalendarDays />],
             [
               "Cần nộp bản cứng",
-              processing.filter((b) => b.physicalStatus === "not_submitted")
+              processing.filter((b) => b.physicalStatus === "chua_nhan")
                 .length,
               <FileText />,
             ],
@@ -911,13 +815,8 @@ export function ClubDashboard() {
                 </div>}
               </div>
             </div>
-            <Button
-              variant="outline"
-              className="bg-white"
-              onClick={() => setMauAOpen(true)}
-            >
-              <FileText />
-              Xuất Mẫu A theo tuần
+            <Button variant="outline" className="bg-white" onClick={() => { setMauABooking(null); setMauAOpen(true); }}>
+              <FileText /> Xuất Mẫu A theo ngày/tuần
             </Button>
           </CardContent>
         </Card>
@@ -969,7 +868,7 @@ export function ClubDashboard() {
                       {(list as Booking[]).map((b) => {
                         const canEdit =
                           ["draft", "pending_hold", "needs_revision"].includes(b.status) &&
-                          b.physicalStatus !== "confirmed_received";
+                          b.physicalStatus !== "da_nhan_ban_cung";
                         return (
                         <TableRow key={b.id}>
                           <TableCell className="font-medium">{b.id}</TableCell>
@@ -1005,7 +904,8 @@ export function ClubDashboard() {
                               <Button
                                 size="sm"
                                 variant="outline"
-                                onClick={() => setMauAOpen(true)}
+                                disabled={!['pending_hold', 'needs_revision', 'approved', 'room_changed'].includes(b.status)}
+                                onClick={() => { setMauABooking(b); setMauAOpen(true); }}
                               >
                                 <Download />
                                 Mẫu A
@@ -1022,17 +922,11 @@ export function ClubDashboard() {
                                     </Button>
                                   </DropdownMenuTrigger>
                                   <DropdownMenuContent align="end">
-                                    <DropdownMenuItem
-                                      onClick={() => setUpload(b)}
-                                    >
-                                      <UploadCloud />
-                                      Upload scan
-                                    </DropdownMenuItem>
                                     {canEdit && (
                                       <DropdownMenuItem
                                         onClick={() => {
                                           setEditing(b);
-                                          setWizard(true);
+                                          setFormOpen(true);
                                         }}
                                       >
                                         Sửa đơn
@@ -1060,27 +954,19 @@ export function ClubDashboard() {
           ))}
         </Tabs>
       </div>
-      {wizard && (
-        <BookingWizard
+      {formOpen && (
+        <BookingFormDialog
           key={editing?.id ?? "new"}
-          open={wizard}
+          open={formOpen}
           editing={editing}
+          onCreated={(booking) => { setMauABooking(booking); setMauAOpen(true); }}
           close={() => {
-            setWizard(false);
+            setFormOpen(false);
             setEditing(null);
           }}
         />
       )}
-      {upload && (
-        <Upload
-          key={upload.id}
-          booking={upload}
-          close={() => setUpload(null)}
-        />
-      )}
-      {mauAOpen && (
-        <MauAPreview open={mauAOpen} close={() => setMauAOpen(false)} />
-      )}
+      {mauAOpen && <MauAPreview initialBooking={mauABooking} close={() => { setMauAOpen(false); setMauABooking(null); }} />}
       <BookingDetailDialog booking={detail} close={() => setDetail(null)} />
       <Dialog open={!!cancel} onOpenChange={(v) => !v && setCancel(null)}>
         <DialogContent>

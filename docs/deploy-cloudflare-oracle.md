@@ -1,6 +1,6 @@
 # Triển khai: Cloudflare Pages + Oracle Cloud Always Free
 
-Giao diện React chạy tại `https://<ten-du-an>.pages.dev`. Cloudflare Pages Function nhận `/api/*` và chuyển tiếp đến Django trên một máy Oracle Cloud. PostgreSQL, Redis, Celery và tệp scan nằm trên máy Oracle. Trình duyệt chỉ gọi `/api` cùng nguồn với giao diện, nên không cần cấu hình CORS cho `pages.dev`.
+Giao diện React chạy tại `https://<ten-du-an>.pages.dev`. Cloudflare Pages Function nhận `/api/*` và chuyển tiếp đến Django trên một máy Oracle Cloud. PostgreSQL, Redis và Celery chạy trên máy Oracle. Trình duyệt chỉ gọi `/api` cùng nguồn với giao diện, nên không cần cấu hình CORS cho `pages.dev`.
 
 ## Điều kiện cần
 

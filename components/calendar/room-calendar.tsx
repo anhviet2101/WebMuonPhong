@@ -388,8 +388,6 @@ export function RoomCalendar() {
     equipment: [],
     status: b.status,
     physicalStatus: b.physical_status,
-    scanName: b.scan_file_url?.split("/").pop(),
-    scanFileUrl: b.scan_file_url,
     organizationProfile: b.organization_profile,
     hiddenDetails: Boolean(b.hidden_details),
     holdExpiresAt: b.hold_expires_at,

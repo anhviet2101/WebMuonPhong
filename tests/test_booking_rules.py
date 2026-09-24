@@ -37,8 +37,8 @@ def booking_context():
         abbreviation="OTHER",
         type="club",
     )
-    club_role = Role.objects.create(name="CLB_REP")
-    admin_role = Role.objects.create(name="YU_ADMIN")
+    club_role = Role.objects.get_or_create(name="CLB_REP")[0]
+    admin_role = Role.objects.get_or_create(name="YU_ADMIN")[0]
     club_user = User.objects.create_user(
         username="club_test",
         password="test-password",
@@ -133,28 +133,13 @@ def test_double_booking_prevention(booking_context):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    "physical_status",
-    [PhysicalStatus.NOT_SUBMITTED, PhysicalStatus.SUBMITTED],
-)
-def test_approve_requires_physical_confirmed(booking_context, physical_status):
-    booking = make_booking(
-        booking_context,
-        activity_name=f"Chờ bản cứng {physical_status}",
-    )
+def test_approve_records_hard_copy_in_one_action(booking_context):
+    booking = make_booking(booking_context, activity_name="Ch? b?n c?ng")
     submit_booking(booking, booking_context["club_user"])
-    booking.physical_status = physical_status
-    booking.save(update_fields=["physical_status", "updated_at"])
-
-    with pytest.raises(ValidationError, match="Chưa nhận bản cứng từ CLB"):
-        approve_booking(booking, booking_context["admin_user"])
-
-    booking.physical_status = PhysicalStatus.CONFIRMED_RECEIVED
-    booking.save(update_fields=["physical_status", "updated_at"])
     approved = approve_booking(booking, booking_context["admin_user"])
-
     assert approved.status == BookingStatus.APPROVED
-    assert approved.physical_status == PhysicalStatus.CONFIRMED_RECEIVED
+    assert approved.physical_status == PhysicalStatus.DA_NHAN_BAN_CUNG
+    assert approved.physical_confirmed_by == booking_context["admin_user"]
 
 
 @pytest.mark.django_db

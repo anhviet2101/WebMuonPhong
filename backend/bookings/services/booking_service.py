@@ -1,15 +1,10 @@
 from datetime import timedelta
-from pathlib import Path
-from urllib.parse import quote
 
-from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.core.files.storage import default_storage
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
-from django.utils.text import get_valid_filename
 
 from backend.bookings.models import (
     ApprovalDecision,
@@ -36,8 +31,6 @@ MAX_BOOKING_DURATION_HOURS_KEY = "max_booking_duration_hours"
 MAX_BOOKINGS_PER_WEEK_PER_ORG_KEY = "max_bookings_per_week_per_org"
 LARGE_HALL_MIN_ADVANCE_DAYS_KEY = "large_hall_min_advance_days"
 LARGE_ACTIVITY_PARTICIPANT_THRESHOLD_KEY = "large_activity_participant_threshold"
-MAX_SCAN_FILE_SIZE_BYTES = 10 * 1024 * 1024
-ALLOWED_SCAN_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 DRAFT = BookingStatus.DRAFT.value
 PENDING_HOLD = BookingStatus.PENDING_HOLD.value
 NEEDS_REVISION = BookingStatus.NEEDS_REVISION.value
@@ -48,9 +41,8 @@ COMPLETED = BookingStatus.COMPLETED.value
 CANCELLED = BookingStatus.CANCELLED.value
 EXPIRED = BookingStatus.EXPIRED.value
 
-NOT_SUBMITTED = PhysicalStatus.NOT_SUBMITTED.value
-SUBMITTED = PhysicalStatus.SUBMITTED.value
-CONFIRMED_RECEIVED = PhysicalStatus.CONFIRMED_RECEIVED.value
+NOT_SUBMITTED = PhysicalStatus.CHUA_NHAN.value
+CONFIRMED_RECEIVED = PhysicalStatus.DA_NHAN_BAN_CUNG.value
 
 BLACKOUT_ROOM = BlackoutScopeType.ROOM.value
 BLACKOUT_BUILDING = BlackoutScopeType.BUILDING.value
@@ -75,12 +67,15 @@ def get_available_rooms(start_time, end_time, current_booking_id=None, queryset=
     )
     available = []
     for room in rooms:
-        buffered_start = start_time - timedelta(minutes=room.buffer_before_minutes)
-        buffered_end = end_time + timedelta(minutes=room.buffer_after_minutes)
+        before = max(15, room.buffer_before_minutes)
+        after = max(15, room.buffer_after_minutes)
+        buffered_start = start_time - timedelta(minutes=before)
+        buffered_end = end_time + timedelta(minutes=after)
         conflicts = Booking.objects.filter(
             room=room,
             status__in=CONFLICT_STATUSES,
-            during__overlap=(buffered_start, buffered_end),
+            start_time__lt=buffered_end + timedelta(minutes=before),
+            end_time__gt=buffered_start - timedelta(minutes=after),
         )
         if current_booking_id is not None:
             conflicts = conflicts.exclude(pk=current_booking_id)
@@ -122,7 +117,6 @@ ADMIN_PERMISSION_CANDIDATES = {
     "booking.reject",
     "booking.request_revision",
     "booking.change_room",
-    "booking.confirm_physical_submission",
     "booking.cancel_any",
     "booking.manage",
 }
@@ -244,12 +238,19 @@ def submit_booking(booking, user, reason=None):
 
 
 def approve_booking(booking, user, reason=None):
-    return transition_status(
-        booking=booking,
-        target_status=APPROVED,
-        user=user,
-        reason=reason,
-    )
+    _require_yu_admin(user)
+    with transaction.atomic():
+        locked_booking = _lock_booking(booking)
+        if locked_booking.status not in {PENDING_HOLD, NEEDS_REVISION}:
+            raise ValidationError("Chỉ duyệt đơn đang chờ xử lý.")
+        if locked_booking.physical_status != CONFIRMED_RECEIVED:
+            old_value = _booking_audit_snapshot(locked_booking)
+            locked_booking.physical_status = CONFIRMED_RECEIVED
+            locked_booking.physical_confirmed_at = timezone.now()
+            locked_booking.physical_confirmed_by = user
+            locked_booking.save(update_fields=["physical_status", "physical_confirmed_at", "physical_confirmed_by", "updated_at"])
+            _create_audit_log(locked_booking, user, "confirm_physical", old_value)
+        return transition_status(locked_booking, APPROVED, user, reason)
 
 
 def reject_booking(booking, user, reason=None):
@@ -316,95 +317,6 @@ def cancel_booking(booking, user, reason=None):
         user=user,
         reason=reason,
     )
-
-
-def upload_scan(booking, file, user=None):
-    """Persist a signed application scan and mark the physical copy as submitted."""
-
-    _validate_scan_file(file)
-    saved_path = None
-
-    try:
-        with transaction.atomic():
-            locked_booking = _lock_booking(booking)
-            _validate_can_upload_scan(locked_booking)
-
-            old_value = _booking_audit_snapshot(locked_booking)
-            saved_path = default_storage.save(
-                _build_scan_storage_path(locked_booking, file),
-                file,
-            )
-
-            # Keep the object key behind the authenticated booking scan endpoint.
-            # An S3 storage URL could otherwise expose a temporary signed URL.
-            locked_booking.scan_file_url = (
-                settings.MEDIA_URL.rstrip("/") + "/" + quote(saved_path, safe="/")
-            )
-            locked_booking.physical_status = SUBMITTED
-            locked_booking.physical_submitted_at = timezone.now()
-            locked_booking.save(
-                update_fields=[
-                    "scan_file_url",
-                    "physical_status",
-                    "physical_submitted_at",
-                    "updated_at",
-                ]
-            )
-
-            _create_audit_log(
-                booking=locked_booking,
-                user=user or locked_booking.created_by,
-                action="upload_scan",
-                old_value=old_value,
-            )
-            _notify_admins(
-                Notification.NotificationType.SUBMITTED,
-                f"CLB đã upload bản scan cho đơn '{locked_booking.activity_name}'.",
-                locked_booking,
-            )
-
-            return locked_booking
-    except Exception:
-        if saved_path:
-            default_storage.delete(saved_path)
-        raise
-
-
-def confirm_physical(booking, admin_user):
-    """Confirm that the Youth Union office received the hard-copy application."""
-
-    _require_yu_admin(admin_user)
-
-    with transaction.atomic():
-        locked_booking = _lock_booking(booking)
-
-        old_value = _booking_audit_snapshot(locked_booking)
-        locked_booking.physical_status = CONFIRMED_RECEIVED
-        locked_booking.physical_confirmed_at = timezone.now()
-        locked_booking.physical_confirmed_by = admin_user
-        locked_booking.save(
-            update_fields=[
-                "physical_status",
-                "physical_confirmed_at",
-                "physical_confirmed_by",
-                "updated_at",
-            ]
-        )
-
-        _create_audit_log(
-            booking=locked_booking,
-            user=admin_user,
-            action="confirm_physical",
-            old_value=old_value,
-        )
-        _notify_user(
-            locked_booking.created_by,
-            Notification.NotificationType.SUBMITTED,
-            f"VP Đoàn đã xác nhận nhận bản cứng cho đơn '{locked_booking.activity_name}'.",
-            locked_booking,
-        )
-
-        return locked_booking
 
 
 def _validate_transition(booking, target_status, user, reason, new_room):
@@ -569,7 +481,8 @@ def _validate_no_room_conflict(booking, room):
         .filter(
             room=room,
             status__in=CONFLICT_STATUSES,
-            during__overlap=(buffered_start, buffered_end),
+            start_time__lt=buffered_end + timedelta(minutes=max(15, room.buffer_before_minutes)),
+            end_time__gt=buffered_start - timedelta(minutes=max(15, room.buffer_after_minutes)),
         )
         .exists()
     )
@@ -620,40 +533,9 @@ def _buffered_range_for_room(booking, room):
         raise ValidationError("Thời gian kết thúc phải sau thời gian bắt đầu.")
 
     return (
-        booking.start_time - timedelta(minutes=room.buffer_before_minutes),
-        booking.end_time + timedelta(minutes=room.buffer_after_minutes),
+        booking.start_time - timedelta(minutes=max(15, room.buffer_before_minutes)),
+        booking.end_time + timedelta(minutes=max(15, room.buffer_after_minutes)),
     )
-
-
-def _validate_can_upload_scan(booking):
-    if booking.status in {
-        CANCELLED,
-        EXPIRED,
-        COMPLETED,
-    }:
-        raise ValidationError(
-            "Không thể upload bản scan cho booking đã kết thúc hoặc không còn hiệu lực."
-        )
-
-
-def _validate_scan_file(file):
-    if file is None:
-        raise ValidationError("Vui lòng chọn file bản scan.")
-
-    filename = getattr(file, "name", "")
-    extension = Path(filename).suffix.lower()
-    if extension not in ALLOWED_SCAN_EXTENSIONS:
-        raise ValidationError("File bản scan phải có định dạng .jpg, .jpeg, .png hoặc .pdf.")
-
-    file_size = getattr(file, "size", None)
-    if file_size is not None and file_size > MAX_SCAN_FILE_SIZE_BYTES:
-        raise ValidationError("File bản scan không được vượt quá 10MB.")
-
-
-def _build_scan_storage_path(booking, file):
-    original_name = get_valid_filename(Path(file.name).name)
-    timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
-    return f"booking_scans/booking_{booking.pk}/{timestamp}_{original_name}"
 
 
 def _create_booking_approval(booking, user, target_status, reason):
@@ -773,8 +655,6 @@ def _booking_audit_snapshot(booking):
         "room_id": booking.room_id,
         "secondary_room_id": booking.secondary_room_id,
         "hold_expires_at": _isoformat_or_none(booking.hold_expires_at),
-        "scan_file_url": booking.scan_file_url,
-        "physical_submitted_at": _isoformat_or_none(booking.physical_submitted_at),
         "physical_confirmed_at": _isoformat_or_none(booking.physical_confirmed_at),
         "physical_confirmed_by_id": booking.physical_confirmed_by_id,
     }
@@ -879,12 +759,10 @@ __all__ = [
     "approve_booking",
     "cancel_booking",
     "change_room",
-    "confirm_physical",
     "get_available_rooms",
     "reject_booking",
     "request_revision",
     "submit_booking",
     "transition_status",
-    "upload_scan",
     "validate_active_booking_schedule",
 ]

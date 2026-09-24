@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   Clock3,
   Download,
-  Eye,
   ExternalLink,
   FileCheck2,
   FileWarning,
@@ -71,12 +70,12 @@ import {
   type Campus,
   defaultDocumentTemplateContent,
   type DocumentTemplateContent,
-  type PhysicalStatus,
   type Room,
 } from "@/components/shared/prototype-store";
 import {
   exportScheduleDocx,
   printSchedule,
+  scheduleRowDisplay,
   type ScheduleRow,
 } from "@/components/shared/document-export";
 const fmt = (iso: string) =>
@@ -233,6 +232,14 @@ function ActionDialog({
 function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: () => void; openClubProfile: (booking: Booking) => void }) {
   const store = usePrototypeStore();
   const template = store.documentTemplates.find((item) => item.templateType === "mau_b")?.content;
+  const [draftTemplate, setDraftTemplate] = useState<DocumentTemplateContent>({ ...defaultDocumentTemplateContent, ...(template ?? {}) });
+  const [issueDate, setIssueDate] = useState(() => {
+    const date = new Date();
+    return `Hà Nội, ngày ${date.getDate()} tháng ${date.getMonth() + 1} năm ${date.getFullYear()}`;
+  });
+  const [rowEdits, setRowEdits] = useState<Record<string, Partial<ReturnType<typeof scheduleRowDisplay>>>>({});
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  useEffect(() => { setDraftTemplate({ ...defaultDocumentTemplateContent, ...(template ?? {}) }); }, [template]);
   const today = new Date();
   const monday = new Date(today);
   monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
@@ -268,13 +275,28 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
         };
       });
   }, [from, to, store.bookings, store.rooms, store.buildings, store.campuses]);
+  useEffect(() => { setSelectedIds(rows.map((row) => row.booking.id)); }, [rows]);
+  const displayRows = rows.map((row) => ({
+    ...row,
+    display: { ...scheduleRowDisplay(row), ...(rowEdits[row.booking.id] ?? {}) },
+  }));
+  const selectedRows = displayRows.filter((row) => selectedIds.includes(row.booking.id));
+  const editRow = (id: string, key: keyof ReturnType<typeof scheduleRowDisplay>, value: string) =>
+    setRowEdits((current) => ({ ...current, [id]: { ...(current[id] ?? {}), [key]: value } }));
+  const editTemplate = (key: keyof DocumentTemplateContent, value: string) =>
+    setDraftTemplate((current) => ({ ...current, [key]: value }));
+  const templateField = (key: keyof DocumentTemplateContent, label: string, rows = 2) => (
+    <label className="grid gap-1 text-sm"><span className="font-semibold">{label}</span>
+      <textarea className="rounded-md border bg-white p-2 font-serif text-black" rows={rows} value={draftTemplate[key]} onChange={(event) => editTemplate(key, event.target.value)} />
+    </label>
+  );
   return (
     <Dialog open={open} onOpenChange={(value) => !value && close()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle>Xem trước Đơn đề nghị - Mẫu B</DialogTitle>
           <DialogDescription>
-            Tổng hợp lịch đã duyệt của tất cả CLB theo khoảng ngày.
+            Tổng hợp lịch đã duyệt. Admin có thể sửa nội dung và từng dòng riêng cho lần xuất này.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 rounded-lg border bg-slate-50 p-4 sm:grid-cols-2">
@@ -295,10 +317,20 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
             />
           </div>
         </div>
+        <div className="grid gap-3 rounded-lg border bg-white p-4 sm:grid-cols-2">
+          {templateField("leftHeader", "Header trái", 3)}
+          <div className="grid gap-2">{templateField("rightHeader", "Header phải", 1)}
+            <label className="grid gap-1 text-sm"><span className="font-semibold">Ngày lập đơn</span><Input className="font-serif" value={issueDate} onChange={(event) => setIssueDate(event.target.value)} /></label>
+          </div>
+          {templateField("title", "Tiêu đề", 1)}
+          {templateField("recipient", "Kính gửi", 1)}
+          <div className="sm:col-span-2">{templateField("intro", "Đoạn mở đầu", 4)}</div>
+        </div>
         <div className="overflow-x-auto rounded-lg border">
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead><input type="checkbox" aria-label="Chọn tất cả lịch" checked={rows.length > 0 && selectedIds.length === rows.length} onChange={(event) => setSelectedIds(event.target.checked ? rows.map((row) => row.booking.id) : [])} /></TableHead>
                 <TableHead>STT</TableHead>
                 <TableHead>Thời gian</TableHead>
                 <TableHead>Địa điểm</TableHead>
@@ -310,38 +342,35 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
               {rows.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={5}
+                    colSpan={6}
                     className="py-10 text-center text-slate-500"
                   >
                     Không có lịch đã duyệt trong khoảng ngày này.
                   </TableCell>
                 </TableRow>
               ) : (
-                rows.map((row, index) => (
+                displayRows.map((row, index) => (
                   <TableRow key={row.booking.id}>
+                    <TableCell><input type="checkbox" aria-label={`Chọn lịch ${row.booking.id}`} checked={selectedIds.includes(row.booking.id)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...current, row.booking.id] : current.filter((id) => id !== row.booking.id))} /></TableCell>
                     <TableCell>{index + 1}</TableCell>
+                    <TableCell><textarea className="min-w-40 rounded border p-2 font-serif" rows={3} value={row.display.time} onChange={(event) => editRow(row.booking.id, "time", event.target.value)} /></TableCell>
+                    <TableCell><textarea className="min-w-32 rounded border p-2 font-serif" rows={3} value={row.display.location} onChange={(event) => editRow(row.booking.id, "location", event.target.value)} /></TableCell>
                     <TableCell>
-                      {fmt(row.booking.startAt)} -{" "}
-                      {new Date(row.booking.endAt).toLocaleTimeString("vi-VN", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
+                      <Input className="min-w-40 font-serif" value={row.display.organization} onChange={(event) => editRow(row.booking.id, "organization", event.target.value)} />
+                      <button className="mt-1 text-xs text-blue-700 hover:underline" onClick={() => openClubProfile(row.booking)}>Xem hồ sơ CLB</button>
                     </TableCell>
-                    <TableCell>
-                      {row.room?.name ?? row.booking.roomName} - {row.building?.name ?? row.booking.buildingName}
-                    </TableCell>
-                    <TableCell>
-                      <button className="font-semibold text-blue-700 hover:underline" onClick={() => openClubProfile(row.booking)}>{row.booking.clubName}</button>
-                      <p className="text-xs text-slate-500">
-                        {row.booking.activityName}
-                      </p>
-                    </TableCell>
-                    <TableCell>{row.booking.note || ""}</TableCell>
+                    <TableCell><Input className="min-w-28 font-serif" value={row.display.note} onChange={(event) => editRow(row.booking.id, "note", event.target.value)} /></TableCell>
                   </TableRow>
                 ))
               )}
             </TableBody>
           </Table>
+        </div>
+        <div className="grid gap-3 rounded-lg border bg-white p-4 sm:grid-cols-2">
+          <div className="sm:col-span-2">{templateField("commitment", "Cam kết", 3)}</div>
+          <div className="sm:col-span-2">{templateField("closing", "Lời kết", 2)}</div>
+          {templateField("leftSignature", "Chữ ký trái", 3)}
+          {templateField("rightSignature", "Chữ ký phải", 3)}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={close}>
@@ -349,16 +378,16 @@ function ExportDialog({ open, close, openClubProfile }: { open: boolean; close: 
           </Button>
           <Button
             variant="outline"
-            disabled={!rows.length}
-            onClick={() => printSchedule(rows, template)}
+            disabled={!selectedRows.length}
+            onClick={() => printSchedule(selectedRows, draftTemplate, { issueDate })}
           >
             <Printer />
             In đơn
           </Button>
           <Button
-            disabled={!rows.length}
+            disabled={!selectedRows.length}
             onClick={async () => {
-              await exportScheduleDocx(rows, `Mau-B-${from}-${to}.docx`, template);
+              await exportScheduleDocx(selectedRows, `Mau-B-${from}-${to}.docx`, draftTemplate, { issueDate });
               toast.success("Đã tải Mẫu B tổng hợp");
             }}
           >
@@ -447,23 +476,17 @@ function SupportDialog({ open, close }: { open: boolean; close: () => void }) {
 
 function TemplateDialog({ open, close }: { open: boolean; close: () => void }) {
   const store = usePrototypeStore();
-  const [type, setType] = useState<"mau_a" | "mau_b">("mau_a");
-  const current = store.documentTemplates.find((item) => item.templateType === type);
+  const current = store.documentTemplates.find((item) => item.templateType === "mau_b");
   const [form, setForm] = useState<DocumentTemplateContent>({
     ...defaultDocumentTemplateContent,
     ...(current?.content ?? {}),
   });
 
-  const selectType = (value: "mau_a" | "mau_b") => {
-    const next = store.documentTemplates.find((item) => item.templateType === value);
-    setType(value);
-    setForm({ ...defaultDocumentTemplateContent, ...(next?.content ?? {}) });
-  };
   const field = (key: keyof DocumentTemplateContent, value: string) =>
     setForm((state) => ({ ...state, [key]: value }));
   const save = async () => {
-    await store.updateDocumentTemplate(type, {
-      name: type === "mau_a" ? "Mẫu A" : "Mẫu B",
+    await store.updateDocumentTemplate("mau_b", {
+      name: "Mẫu B",
       content: form,
       active: true,
     });
@@ -485,20 +508,11 @@ function TemplateDialog({ open, close }: { open: boolean; close: () => void }) {
     <Dialog open={open} onOpenChange={(value) => !value && close()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader>
-          <DialogTitle>Quản lý Mẫu A/B</DialogTitle>
+          <DialogTitle>Quản lý Mẫu B mặc định</DialogTitle>
           <DialogDescription>
             Nội dung lưu trong cơ sở dữ liệu và áp dụng cho lần xuất đơn tiếp theo.
           </DialogDescription>
         </DialogHeader>
-        <Select value={type} onValueChange={(value) => selectType(value as "mau_a" | "mau_b")}>
-          <SelectTrigger className="w-full sm:w-64">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="mau_a">Mẫu A</SelectItem>
-            <SelectItem value="mau_b">Mẫu B</SelectItem>
-          </SelectContent>
-        </Select>
         <div className="grid gap-4 sm:grid-cols-2">
           {input("leftHeader", "Header trái", 3)}
           {input("rightHeader", "Header phải", 3)}
@@ -515,88 +529,6 @@ function TemplateDialog({ open, close }: { open: boolean; close: () => void }) {
             Hủy
           </Button>
           <Button onClick={save}>Lưu mẫu</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function ScanPreviewDialog({ booking, close }: { booking: Booking | null; close: () => void }) {
-  const url = booking?.scanFileUrl;
-  const lower = url?.toLowerCase() ?? "";
-  const [previewUrl, setPreviewUrl] = useState<string | undefined>();
-  const [previewMime, setPreviewMime] = useState("");
-  const [previewError, setPreviewError] = useState(false);
-  useEffect(() => {
-    setPreviewMime("");
-    setPreviewError(false);
-    if (!booking || !url) {
-      setPreviewUrl(undefined);
-      return;
-    }
-    if (!url.startsWith("/media/") && !url.startsWith("media/")) {
-      setPreviewUrl(url);
-      if (url.startsWith("blob:")) {
-        let active = true;
-        void fetch(url)
-          .then((response) => response.blob())
-          .then((blob) => { if (active) setPreviewMime(blob.type); })
-          .catch(() => { if (active) setPreviewError(true); });
-        return () => { active = false; };
-      }
-      return;
-    }
-    let active = true;
-    let blobUrl: string | undefined;
-    setPreviewUrl(undefined);
-    api.get(`${endpoints.bookings}${booking.id}/scan/`, { responseType: "blob" })
-      .then(({ data }) => {
-        blobUrl = URL.createObjectURL(data);
-        if (active) {
-          setPreviewMime(data.type);
-          setPreviewUrl(blobUrl);
-        }
-        else URL.revokeObjectURL(blobUrl);
-      })
-      .catch(() => { if (active) setPreviewError(true); });
-    return () => {
-      active = false;
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-    };
-  }, [booking?.id, url]);
-  const isPdf = previewMime.toLowerCase().includes("application/pdf") || /\.pdf(?:[?#]|$)/.test(lower) ||
-    booking?.scanName?.toLowerCase().endsWith(".pdf") ||
-    lower.startsWith("data:application/pdf");
-  return (
-    <Dialog open={!!booking} onOpenChange={(value) => !value && close()}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
-        <DialogHeader>
-          <DialogTitle>Bản scan {booking?.id}</DialogTitle>
-          <DialogDescription>{booking?.activityName}</DialogDescription>
-        </DialogHeader>
-        {!url ? (
-          <div className="rounded-md border bg-slate-50 p-6 text-sm text-slate-600">
-            Đơn này chưa có bản scan.
-          </div>
-        ) : previewError ? (
-          <div className="rounded-md border bg-slate-50 p-6 text-sm text-slate-600">Không thể tải bản scan.</div>
-        ) : !previewUrl ? (
-          <div className="rounded-md border bg-slate-50 p-6 text-sm text-slate-600">Đang tải bản scan...</div>
-        ) : isPdf ? (
-          <iframe title="Bản scan PDF" src={previewUrl} className="h-[70vh] w-full rounded-md border" />
-        ) : (
-          <img src={previewUrl} alt={`Bản scan ${booking?.id}`} className="max-h-[70vh] w-full rounded-md border object-contain" />
-        )}
-        <DialogFooter>
-          {previewUrl && (
-            <Button variant="outline" asChild>
-              <a href={previewUrl} target="_blank" rel="noreferrer">
-                <ExternalLink />
-                Mở tab mới
-              </a>
-            </Button>
-          )}
-          <Button onClick={close}>Đóng</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -801,9 +733,7 @@ export function AdminDashboard() {
     [exporting, setExporting] = useState(false),
     [supportOpen, setSupportOpen] = useState(false),
     [templateOpen, setTemplateOpen] = useState(false),
-    [scanPreview, setScanPreview] = useState<Booking | null>(null),
-    [clubProfile, setClubProfile] = useState<Booking | null>(null),
-    [directReceipt, setDirectReceipt] = useState<Set<string>>(new Set());
+    [clubProfile, setClubProfile] = useState<Booking | null>(null);
   const filtered = useMemo(
     () =>
       store.bookings.filter((b) => {
@@ -830,14 +760,14 @@ export function AdminDashboard() {
     ],
     [
       "Chưa nhận bản giấy",
-      store.bookings.filter((b) => b.physicalStatus === "not_submitted").length,
+      store.bookings.filter((b) => b.physicalStatus === "chua_nhan").length,
       <FileWarning />,
     ],
     [
       "Đã nhận & chờ duyệt",
       store.bookings.filter(
         (b) =>
-          b.physicalStatus === "confirmed_received" &&
+          b.physicalStatus === "da_nhan_ban_cung" &&
           b.status === "pending_hold",
       ).length,
       <FileCheck2 />,
@@ -879,7 +809,7 @@ export function AdminDashboard() {
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => setTemplateOpen(true)}>
               <FileCheck2 />
-              Mẫu A/B
+              Mẫu B mặc định
             </Button>
             <Button variant="outline" onClick={() => setSupportOpen(true)}>
               <Settings2 />
@@ -958,10 +888,10 @@ export function AdminDashboard() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">Tất cả bản cứng</SelectItem>
-                    {["not_submitted", "submitted", "confirmed_received"].map(
+                    {["chua_nhan", "da_nhan_ban_cung"].map(
                       (s) => (
                         <SelectItem key={s} value={s}>
-                          {s}
+                          {s === "chua_nhan" ? "Chưa nhận bản cứng" : "Đã nhận bản cứng"}
                         </SelectItem>
                       ),
                     )}
@@ -1023,11 +953,7 @@ export function AdminDashboard() {
                         canApproveStatus = [
                           "pending_hold",
                           "needs_revision",
-                        ].includes(b.status),
-                        direct = directReceipt.has(b.id),
-                        canApprove =
-                          canApproveStatus &&
-                          (b.physicalStatus === "confirmed_received" || direct);
+                        ].includes(b.status);
                       return (
                         <TableRow key={b.id}>
                           <TableCell>
@@ -1075,81 +1001,26 @@ export function AdminDashboard() {
                           </TableCell>
                           <TableCell>
                             <PhysicalStatusBadge status={b.physicalStatus} />
-                            {b.physicalStatus === "not_submitted" && canApproveStatus && (
-                              <label className="mt-2 flex items-start gap-2 text-xs text-slate-600">
-                                <input
-                                  type="checkbox"
-                                  checked={direct}
-                                  onChange={(event) =>
-                                    setDirectReceipt((current) => {
-                                      const next = new Set(current);
-                                      event.target.checked ? next.add(b.id) : next.delete(b.id);
-                                      return next;
-                                    })
-                                  }
-                                />
-                                Xác nhận nhận bản cứng trực tiếp tại VP
-                              </label>
-                            )}
                           </TableCell>
                           <TableCell>
                             <BookingStatusBadge status={b.status} />
                           </TableCell>
                           <TableCell>
                             <div className="flex gap-2">
-                              {b.physicalStatus === "submitted" &&
-                              canProcess ? (
-                                <Button
-                                  size="sm"
-                                  onClick={async () => {
-                                    await store.updateBooking(b.id, {
-                                      physicalStatus: "confirmed_received",
-                                    });
-                                    toast.success("Đã xác nhận nhận bản cứng");
-                                  }}
-                                >
-                                  Nhận bản cứng
-                                </Button>
-                              ) : (
-                                <TooltipProvider>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <span>
-                                        <Button
-                                          size="sm"
-                                           disabled={!canApprove}
-                                           onClick={async () => {
-                                            if (direct && b.physicalStatus !== "confirmed_received") {
-                                              await store.updateBooking(b.id, {
-                                                physicalStatus: "confirmed_received",
-                                              });
-                                            }
-                                            await store.updateBooking(b.id, {
-                                              status: "approved",
-                                            });
-                                            setDirectReceipt((current) => {
-                                              const next = new Set(current);
-                                              next.delete(b.id);
-                                              return next;
-                                            });
-                                            toast.success(
-                                              "Đã duyệt đơn; Calendar chuyển màu xanh",
-                                            );
-                                          }}
-                                        >
-                                          Duyệt
-                                        </Button>
-                                      </span>
-                                    </TooltipTrigger>
-                                    {!canApprove && (
-                                      <TooltipContent>
-                                        Cần xác nhận nhận bản cứng trước khi
-                                        duyệt
-                                      </TooltipContent>
-                                    )}
-                                  </Tooltip>
-                                </TooltipProvider>
-                              )}
+                              <Button
+                                size="sm"
+                                disabled={!canApproveStatus}
+                                onClick={async () => {
+                                  try {
+                                    await store.updateBooking(b.id, { status: "approved" });
+                                    toast.success("Đã nhận bản cứng và duyệt đơn");
+                                  } catch {
+                                    // Store displays the API error.
+                                  }
+                                }}
+                              >
+                                Nhận bản cứng & duyệt
+                              </Button>
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                   <Button size="icon-sm" variant="outline">
@@ -1157,13 +1028,6 @@ export function AdminDashboard() {
                                   </Button>
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end">
-                                  <DropdownMenuItem
-                                    disabled={!b.scanFileUrl}
-                                    onClick={() => setScanPreview(b)}
-                                  >
-                                    <Eye />
-                                    Xem bản scan
-                                  </DropdownMenuItem>
                                   <DropdownMenuItem
                                     disabled={!canProcess}
                                     onClick={() =>
@@ -1233,7 +1097,6 @@ export function AdminDashboard() {
       {templateOpen && (
         <TemplateDialog open={templateOpen} close={() => setTemplateOpen(false)} />
       )}
-      <ScanPreviewDialog booking={scanPreview} close={() => setScanPreview(null)} />
       <ClubProfileDialog booking={clubProfile} close={() => setClubProfile(null)} />
     </main>
   );

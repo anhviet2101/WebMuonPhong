@@ -1,12 +1,6 @@
-import mimetypes
-from pathlib import PurePosixPath
-from urllib.parse import unquote, urlparse
 
-from django.conf import settings
-from django.core.files.storage import default_storage
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.http import FileResponse, Http404
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -15,7 +9,6 @@ from rest_framework import mixins, status, viewsets
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -56,7 +49,6 @@ from backend.bookings.serializers import (
     ChangeRoomSerializer,
     RoomBlackoutSerializer,
     RoomSerializer,
-    UploadScanSerializer,
     ChangePasswordSerializer,
     OrganizationSerializer,
     UserAdminSerializer,
@@ -568,10 +560,6 @@ class BookingViewSet(
         action_permissions = {
             "create": [IsAuthenticated(), HasPermission("booking.create")],
             "submit": [IsAuthenticated(), HasPermission("booking.create")],
-            "confirm_physical": [
-                IsAuthenticated(),
-                HasPermission("booking.confirm_physical_submission"),
-            ],
             "approve": [IsAuthenticated(), HasPermission("booking.approve")],
             "reject": [IsAuthenticated(), HasPermission("booking.reject")],
             "request_revision": [
@@ -600,6 +588,21 @@ class BookingViewSet(
     def perform_create(self, serializer):
         serializer.save()
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                self.perform_create(serializer)
+                booking = booking_service.submit_booking(serializer.instance, request.user)
+        except DjangoValidationError as exc:
+            raise ValidationError(_serialize_django_validation_error(exc)) from exc
+        except DjangoPermissionDenied as exc:
+            raise PermissionDenied(str(exc)) from exc
+        except IntegrityError as exc:
+            raise ValidationError("Phòng đã có lịch trùng trong khoảng thời gian này.") from exc
+        return Response(self.get_serializer(booking).data, status=status.HTTP_201_CREATED)
+
     def perform_update(self, serializer):
         booking = self.get_object()
         if not is_admin(self.request.user) and booking.status not in {
@@ -612,7 +615,7 @@ class BookingViewSet(
             )
         if (
             not is_admin(self.request.user)
-            and booking.physical_status == PhysicalStatus.CONFIRMED_RECEIVED
+            and booking.physical_status == PhysicalStatus.DA_NHAN_BAN_CUNG
         ):
             raise PermissionDenied(
                 "Đơn đã được VP Đoàn xác nhận nhận bản cứng, CLB không thể chỉnh sửa."
@@ -662,51 +665,6 @@ class BookingViewSet(
             booking,
             request.user,
             serializer.validated_data.get("reason"),
-        )
-
-    @action(
-        detail=True,
-        methods=["post"],
-        parser_classes=[MultiPartParser, FormParser],
-        url_path="upload-scan",
-    )
-    def upload_scan(self, request, pk=None):
-        booking = self.get_object()
-        serializer = UploadScanSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        return self._service_response(
-            booking_service.upload_scan,
-            booking,
-            serializer.validated_data["file"],
-            request.user,
-        )
-
-    @action(detail=True, methods=["get"], url_path="scan")
-    def scan(self, request, pk=None):
-        booking = self.get_object()
-        media_prefix = settings.MEDIA_URL.rstrip("/") + "/"
-        path = unquote(urlparse(booking.scan_file_url).path)
-        if not path.startswith(media_prefix):
-            raise Http404()
-        storage_path = path[len(media_prefix):]
-        parts = PurePosixPath(storage_path).parts
-        if not parts or any(part in {".", ".."} for part in parts):
-            raise Http404()
-        try:
-            stored_file = default_storage.open(storage_path, "rb")
-        except (FileNotFoundError, OSError):
-            raise Http404() from None
-        content_type = mimetypes.guess_type(storage_path)[0] or "application/octet-stream"
-        return FileResponse(stored_file, content_type=content_type)
-
-    @action(detail=True, methods=["post"], url_path="confirm-physical")
-    def confirm_physical(self, request, pk=None):
-        booking = self.get_object()
-        return self._service_response(
-            booking_service.confirm_physical,
-            booking,
-            request.user,
         )
 
     @action(detail=True, methods=["post"])
@@ -815,9 +773,7 @@ class BookingViewSet(
                     "equipment_request": {},
                     "notes": "",
                     "status": BookingStatus.PENDING_HOLD,
-                    "physical_status": PhysicalStatus.NOT_SUBMITTED,
-                    "scan_file_url": "",
-                    "physical_submitted_at": None,
+                    "physical_status": PhysicalStatus.CHUA_NHAN,
                     "physical_confirmed_at": None,
                     "physical_confirmed_by": None,
                     "hold_expires_at": None,
