@@ -1,6 +1,7 @@
 ﻿"use client";
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertCircle,
   CalendarDays,
   Clock3,
   Download,
@@ -73,6 +74,13 @@ const fmt = (iso: string) =>
     timeStyle: "short",
     hourCycle: "h23",
   }).format(new Date(iso)) : "Chưa chọn thời gian";
+const paperDeadlineLabel = (iso: string) => {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "Chưa có hạn nộp";
+  const weekday = new Intl.DateTimeFormat("vi-VN", { weekday: "long" }).format(date);
+  const day = new Intl.DateTimeFormat("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+  return `${String(date.getHours()).padStart(2, "0")}h${String(date.getMinutes()).padStart(2, "0")} ${weekday}, ngày ${day}`;
+};
 const defaultBookingTime = (hour: number) => {
   const date = new Date();
   date.setDate(date.getDate() + (8 - date.getDay()) % 7 || 7);
@@ -696,6 +704,8 @@ export function ClubDashboard() {
   const processing = mine.filter((b) =>
     ["pending_hold", "needs_revision"].includes(b.status),
   );
+  const pendingPaper = processing.filter((b) => b.physicalStatus === "chua_nhan");
+  const paperDeadlines = [...new Set(pendingPaper.map((b) => b.paperDeadlineAt).filter((value): value is string => Boolean(value)))].sort();
   const upcoming = mine.filter(
     (b) =>
       ["approved", "room_changed"].includes(b.status) &&
@@ -744,8 +754,7 @@ export function ClubDashboard() {
             ["Lịch sắp tới", upcoming.length, <CalendarDays />],
             [
               "Cần nộp bản cứng",
-              processing.filter((b) => b.physicalStatus === "chua_nhan")
-                .length,
+              pendingPaper.length,
               <FileText />,
             ],
           ].map(([label, value, icon]) => (
@@ -760,6 +769,24 @@ export function ClubDashboard() {
             </Card>
           ))}
         </div>
+        {pendingPaper.length > 0 && (
+          <Card className="border-amber-300 bg-amber-50">
+            <CardContent className="flex items-start gap-3 p-5">
+              <AlertCircle className="mt-0.5 size-5 shrink-0 text-amber-700" />
+              <div>
+                <h2 className="font-semibold text-amber-950">Hạn nộp đơn bản cứng</h2>
+                {paperDeadlines.map((deadline) => (
+                  <p key={deadline} className="mt-1 text-sm text-amber-900">
+                    {paperDeadlineLabel(deadline)} · {pendingPaper.filter((b) => b.paperDeadlineAt === deadline).length} đơn chờ nộp
+                    {new Date(deadline).getTime() < Date.now() && <strong className="ml-2 text-red-700">Đã quá hạn, vui lòng liên hệ cán bộ</strong>}
+                  </p>
+                ))}
+                {paperDeadlines.length === 0 && <p className="mt-1 text-sm text-amber-900">Vui lòng liên hệ cán bộ để xác nhận hạn nộp.</p>}
+                <p className="mt-1 text-xs text-amber-800">Hạn mặc định: 15h thứ Năm của tuần trước tuần mượn. Hạn riêng sau gia hạn được hiển thị theo từng đơn.</p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
         <Card className="border-blue-200 bg-blue-50/60">
           <CardContent className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex items-start gap-3">
@@ -872,6 +899,9 @@ export function ClubDashboard() {
                           </TableCell>
                           <TableCell>
                             <PhysicalStatusBadge status={b.physicalStatus} />
+                            {b.physicalStatus === "chua_nhan" && b.paperDeadlineAt && ["pending_hold", "needs_revision"].includes(b.status) && (
+                              <p className="mt-1 text-xs text-amber-800">Hạn: {paperDeadlineLabel(b.paperDeadlineAt)}</p>
+                            )}
                           </TableCell>
                           <TableCell>
                             <BookingStatusBadge status={b.status} />
